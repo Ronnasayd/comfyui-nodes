@@ -1,42 +1,42 @@
 from inspect import cleandoc
-from PIL import Image, ImageOps
+
 import torch
 import torchvision.transforms as transforms
+from PIL import Image, ImageOps
 
 to_pil = transforms.ToPILImage()
 to_tensor = transforms.PILToTensor()
-import torchvision.transforms.functional as TF
 import numpy as np
+import torchvision.transforms.functional as TF
 
 
-class MyNode:
+class PixelatedBorderNode:
     """
-    A example node
+    Node que adiciona bordas pixeladas à esquerda e à direita de uma imagem.
 
-    Class methods
-    -------------
+    Esta classe permite configurar o tamanho, proporção e pixelização das bordas laterais de uma imagem, retornando a imagem modificada e uma máscara correspondente.
+
+    Métodos de Classe
+    ----------------
     INPUT_TYPES (dict):
-        Tell the main program input parameters of nodes.
+        Informa ao programa principal os parâmetros de entrada do nó.
     IS_CHANGED:
-        optional method to control when the node is re executed.
+        Método opcional para controlar quando o nó é reexecutado.
 
-    Attributes
-    ----------
+    Atributos
+    ---------
     RETURN_TYPES (`tuple`):
-        The type of each element in the output tulple.
+        O tipo de cada elemento na tupla de saída.
     RETURN_NAMES (`tuple`):
-        Optional: The name of each output in the output tulple.
+        Opcional: O nome de cada saída na tupla de saída.
     FUNCTION (`str`):
-        The name of the entry-point method. For example, if `FUNCTION = "execute"` then it will run Example().execute()
+        O nome do método de entrada. Por exemplo, se `FUNCTION = "process_image"`, então executa PixelatedBorderNode().process_image().
     OUTPUT_NODE ([`bool`]):
-        If this node is an output node that outputs a result/image from the graph. The SaveImage node is an example.
-        The backend iterates on these output nodes and tries to execute all their parents if their parent graph is properly connected.
-        Assumed to be False if not present.
+        Se este nó é um nó de saída que exporta um resultado/imagem do grafo.
     CATEGORY (`str`):
-        The category the node should appear in the UI.
-    execute(s) -> tuple || None:
-        The entry point method. The name of this method must be the same as the value of property `FUNCTION`.
-        For example, if `FUNCTION = "execute"` then this method's name must be `execute`, if `FUNCTION = "foo"` then it must be `foo`.
+        Categoria em que o nó aparece na interface.
+    process_image(s) -> tuple || None:
+        O método de entrada. O nome deste método deve ser igual ao valor da propriedade `FUNCTION`.
     """
 
     def __init__(self):
@@ -138,13 +138,9 @@ class MyNode:
         }
 
     RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("image","mask")
+    RETURN_NAMES = ("image", "mask")
     DESCRIPTION = cleandoc(__doc__)
     FUNCTION = "process_image"
-
-    # OUTPUT_NODE = False
-    # OUTPUT_TOOLTIPS = ("",) # Tooltips for the output node
-
     CATEGORY = "MYNodes"
 
     def process_image(
@@ -229,10 +225,15 @@ class MyNode:
         resized_tensor = resized_tensor.permute(1, 2, 0).contiguous()
         resized_tensor = resized_tensor.unsqueeze(0)
 
-
         H, W, C = ncanvas.shape
-        mask = torch.ones((1, H, W), dtype=resized_tensor.dtype, device=resized_tensor.device)
-        mask[:,0:height, paddingLeft + cropLeft : paddingLeft + cropLeft + cwidth -2*cropRight ] = 0
+        mask = torch.ones(
+            (1, H, W), dtype=resized_tensor.dtype, device=resized_tensor.device
+        )
+        mask[
+            :,
+            0:height,
+            paddingLeft + cropLeft : paddingLeft + cropLeft + cwidth - 2 * cropRight,
+        ] = 0
 
         return (resized_tensor, mask)
 
@@ -251,7 +252,7 @@ class MyNode:
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
-NODE_CLASS_MAPPINGS = {"MyNode": MyNode}
+NODE_CLASS_MAPPINGS = {"PixelatedBorderNode": PixelatedBorderNode}
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
-NODE_DISPLAY_NAME_MAPPINGS = {"MyNode": "MyNode Node"}
+NODE_DISPLAY_NAME_MAPPINGS = {"PixelatedBorderNode": "Pixelated Border Node"}
