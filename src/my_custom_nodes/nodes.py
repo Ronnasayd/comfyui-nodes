@@ -1,5 +1,5 @@
-from pixelated_border_node import PixelatedBorderNode
-from video_segment_extender import VideoSegmentExtender
+from .pixelated_border_node import PixelatedBorderNode
+from .video_segment_extender import VideoSegmentExtender
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
