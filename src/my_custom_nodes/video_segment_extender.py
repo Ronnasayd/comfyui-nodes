@@ -90,14 +90,19 @@ class VideoSegmentExtender:
         return (frame, current_segment, False, "")
 
     def save_video_tensor(self, video_tensor, output_path, fps):
-        """
-        Salva VIDEO (tensor) como mp4 usando ffmpeg pipe.
-        VIDEO no Comfy normalmente é:
-        [frames, height, width, channels]
-        """
 
-        frames = video_tensor.cpu().numpy()
-        frames = (frames * 255).astype(np.uint8)
+        tensor = video_tensor.detach().cpu()
+
+        # Se vier com batch dimension
+        if tensor.dim() == 5:
+            # [B, F, H, W, C] → pegar primeiro batch
+            tensor = tensor[0]
+
+        # Agora deve estar [F, H, W, C]
+        if tensor.dim() != 4:
+            raise ValueError("Formato de VIDEO inesperado")
+
+        frames = (tensor.numpy() * 255).astype(np.uint8)
 
         height, width = frames.shape[1], frames.shape[2]
 
