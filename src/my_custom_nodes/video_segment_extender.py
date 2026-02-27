@@ -1,3 +1,4 @@
+import math
 import os
 import subprocess
 
@@ -44,7 +45,7 @@ class VideoSegmentExtender:
         project_path = os.path.join(base_output, project_name)
         os.makedirs(project_path, exist_ok=True)
 
-        max_segments = total_seconds // segment_seconds
+        max_segments = math.ceil(total_seconds / segment_seconds)
 
         existing_segments = sorted(
             [
@@ -66,7 +67,6 @@ class VideoSegmentExtender:
 
             current_segment += 1
 
-            # liberar memória
             del last_video
             torch.cuda.empty_cache()
 
@@ -74,35 +74,54 @@ class VideoSegmentExtender:
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
             self.concat_videos(project_path, final_video)
-            return (initial_image, current_segment, True, final_video)
+
+            return (
+                initial_image,
+                int(current_segment),
+                bool(True),
+                str(final_video),
+            )
 
         # 🔹 Se nenhum segmento ainda
         if current_segment == 0:
-            return (initial_image, current_segment, False, "")
+            return (
+                initial_image,
+                int(current_segment),
+                bool(False),
+                "",
+            )
 
-        # 🔹 Extrair último frame do último segmento salvo
+        # 🔹 Extrair último frame
         last_segment_path = os.path.join(
             project_path, f"segment_{current_segment-1:03d}.mp4"
         )
 
         frame = self.extract_last_frame_ffmpeg(last_segment_path, project_path)
 
-        return (frame, current_segment, False, "")
+        return (
+            frame,
+            int(current_segment),
+            bool(False),
+            "",
+        )
 
+    # ===============================
+    # SALVAR VIDEO (SUPORTE BATCH)
+    # ===============================
     def save_video_tensor(self, video_tensor, output_path, fps):
 
         tensor = video_tensor.detach().cpu()
 
-        # Se vier com batch dimension
+        # Caso venha com batch dimension
         if tensor.dim() == 5:
-            # [B, F, H, W, C] → pegar primeiro batch
+            # [B, F, H, W, C] → usar primeiro batch
             tensor = tensor[0]
 
-        # Agora deve estar [F, H, W, C]
         if tensor.dim() != 4:
             raise ValueError("Formato de VIDEO inesperado")
 
-        frames = (tensor.numpy() * 255).astype(np.uint8)
+        # Agora esperado: [F, H, W, C]
+        frames = (tensor.numpy() * 255.0).clip(0, 255).astype(np.uint8)
 
         height, width = frames.shape[1], frames.shape[2]
 
@@ -142,6 +161,12 @@ class VideoSegmentExtender:
         process.stdin.close()
         process.wait()
 
+        if not os.path.exists(output_path):
+            raise RuntimeError("Falha ao salvar vídeo com ffmpeg")
+
+    # ===============================
+    # EXTRAIR ÚLTIMO FRAME
+    # ===============================
     def extract_last_frame_ffmpeg(self, video_path, project_path):
 
         temp_frame_path = os.path.join(project_path, "last_frame.png")
@@ -162,12 +187,21 @@ class VideoSegmentExtender:
 
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        if not os.path.exists(temp_frame_path):
+            raise RuntimeError("Falha ao extrair último frame")
+
         img = Image.open(temp_frame_path).convert("RGB")
+
         np_img = np.array(img).astype(np.float32) / 255.0
         np_img = np.expand_dims(np_img, 0)
 
-        return np_img
+        tensor_img = torch.from_numpy(np_img).float()
 
+        return tensor_img
+
+    # ===============================
+    # CONCATENAR VÍDEOS
+    # ===============================
     def concat_videos(self, folder, output_path):
 
         list_file = os.path.join(folder, "concat_list.txt")
@@ -175,7 +209,8 @@ class VideoSegmentExtender:
         with open(list_file, "w") as f:
             for file in sorted(os.listdir(folder)):
                 if file.startswith("segment_") and file.endswith(".mp4"):
-                    f.write(f"file '{os.path.join(folder, file)}'\n")
+                    full_path = os.path.join(folder, file)
+                    f.write(f"file '{full_path}'\n")
 
         cmd = [
             "ffmpeg",
@@ -192,3 +227,6 @@ class VideoSegmentExtender:
         ]
 
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        if not os.path.exists(output_path):
+            raise RuntimeError("Falha ao concatenar vídeos")
