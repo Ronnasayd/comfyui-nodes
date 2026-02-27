@@ -1,104 +1,119 @@
 import os
 import subprocess
 
-import cv2
 import folder_paths
 import numpy as np
 from PIL import Image
 
 
-class VideoSegmentExtender:
+class WanSegmentStitcher:
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "initial_image": ("IMAGE",),
+                "project_name": ("STRING", {"default": "wan_project"}),
                 "total_seconds": ("INT", {"default": 6, "min": 2, "max": 600}),
                 "segment_seconds": ("INT", {"default": 2, "min": 1, "max": 10}),
-                "fps": ("INT", {"default": 16, "min": 1, "max": 60}),
-                "output_folder": ("STRING", {"default": "wan_segments"}),
             },
             "optional": {
-                "last_video": ("STRING",),
+                "last_video_path": ("STRING",),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN")
-    RETURN_NAMES = ("next_image", "current_segment", "finished")
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("next_image", "current_segment", "finished", "final_video_path")
 
     FUNCTION = "process"
-    CATEGORY = "MYNodes"
+    CATEGORY = "WanTools"
 
     def process(
         self,
         initial_image,
+        project_name,
         total_seconds,
         segment_seconds,
-        fps,
-        output_folder,
-        last_video=None,
+        last_video_path=None,
     ):
 
         base_output = folder_paths.get_output_directory()
-        save_path = os.path.join(base_output, output_folder)
-        os.makedirs(save_path, exist_ok=True)
+        project_path = os.path.join(base_output, project_name)
+        os.makedirs(project_path, exist_ok=True)
 
         max_segments = total_seconds // segment_seconds
 
-        existing_videos = sorted(
-            [f for f in os.listdir(save_path) if f.endswith(".mp4")]
+        existing_segments = sorted(
+            [
+                f
+                for f in os.listdir(project_path)
+                if f.startswith("segment_") and f.endswith(".mp4")
+            ]
         )
 
-        current_segment = len(existing_videos)
+        current_segment = len(existing_segments)
 
-        # Se recebeu novo video, salva
-        if last_video:
+        # Se recebeu novo vídeo, mover para pasta do projeto
+        if last_video_path and os.path.exists(last_video_path):
             new_name = f"segment_{current_segment:03d}.mp4"
-            new_path = os.path.join(save_path, new_name)
-            os.rename(last_video, new_path)
+            new_path = os.path.join(project_path, new_name)
 
-        # Atualiza contagem
-        existing_videos = sorted(
-            [f for f in os.listdir(save_path) if f.endswith(".mp4")]
-        )
-        current_segment = len(existing_videos)
+            os.replace(last_video_path, new_path)
 
-        # Se já terminou todos segmentos
+            current_segment += 1
+            existing_segments.append(new_name)
+
+        # Verifica se terminou
         if current_segment >= max_segments:
-            final_video_path = os.path.join(save_path, "final_video.mp4")
-            self.concat_videos(save_path, final_video_path)
-            return (initial_image, current_segment, True)
+            final_video = os.path.join(project_path, "final_video.mp4")
+            self.concat_videos(project_path, final_video)
+            return (initial_image, current_segment, True, final_video)
 
-        # Se nenhum vídeo ainda → retorna imagem inicial
+        # Se nenhum segmento ainda → usar imagem inicial
         if current_segment == 0:
-            return (initial_image, current_segment, False)
+            return (initial_image, current_segment, False, "")
 
-        # Caso contrário → extrai último frame
-        last_segment_path = os.path.join(save_path, existing_videos[-1])
-        frame = self.extract_last_frame(last_segment_path)
+        # Extrair último frame do último segmento
+        last_segment_path = os.path.join(project_path, existing_segments[-1])
+        frame = self.extract_last_frame_ffmpeg(last_segment_path, project_path)
 
-        return (frame, current_segment, False)
+        return (frame, current_segment, False, "")
 
-    def extract_last_frame(self, video_path):
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
-        ret, frame = cap.read()
-        cap.release()
+    def extract_last_frame_ffmpeg(self, video_path, project_path):
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(frame)
-        np_image = np.array(pil_image).astype(np.float32) / 255.0
-        np_image = np.expand_dims(np_image, 0)
-        return np_image
+        temp_frame_path = os.path.join(project_path, "last_frame.png")
+
+        # Extrai último frame com ffmpeg (leve e estável)
+        cmd = [
+            "ffmpeg",
+            "-sseof",
+            "-0.1",
+            "-i",
+            video_path,
+            "-update",
+            "1",
+            "-q:v",
+            "1",
+            temp_frame_path,
+            "-y",
+        ]
+
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        img = Image.open(temp_frame_path).convert("RGB")
+        np_img = np.array(img).astype(np.float32) / 255.0
+        np_img = np.expand_dims(np_img, 0)
+
+        return np_img
 
     def concat_videos(self, folder, output_path):
-        list_file = os.path.join(folder, "videos.txt")
+
+        list_file = os.path.join(folder, "concat_list.txt")
+
         with open(list_file, "w") as f:
-            for vid in sorted(os.listdir(folder)):
-                if vid.endswith(".mp4") and vid != "final_video.mp4":
-                    f.write(f"file '{os.path.join(folder, vid)}'\n")
+            for file in sorted(os.listdir(folder)):
+                if file.startswith("segment_") and file.endswith(".mp4"):
+                    f.write(f"file '{os.path.join(folder, file)}'\n")
 
         cmd = [
             "ffmpeg",
@@ -111,6 +126,7 @@ class VideoSegmentExtender:
             "-c",
             "copy",
             output_path,
+            "-y",
         ]
 
-        subprocess.run(cmd)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
