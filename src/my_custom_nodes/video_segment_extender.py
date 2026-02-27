@@ -9,6 +9,89 @@ from PIL import Image
 
 
 class VideoSegmentExtender:
+    """
+    VideoSegmentExtender
+
+    Custom node para ComfyUI que permite estender vídeos longos gerando
+    segmentos curtos sequenciais (ex: 2 segundos por vez), ideal para
+    GPUs com pouca VRAM.
+
+    Funcionamento:
+    --------------
+    - Recebe uma imagem inicial.
+    - Recebe opcionalmente um vídeo recém-gerado (segmento anterior).
+    - Salva cada segmento em disco dentro de uma pasta de projeto.
+    - Extrai automaticamente o último frame do segmento anterior.
+    - Retorna esse frame como nova imagem inicial para o próximo ciclo.
+    - Repete o processo até atingir o total de segundos desejado.
+    - Ao finalizar, concatena todos os segmentos em um único vídeo final.
+
+    Fluxo típico com Wan 2.2:
+    --------------------------
+    1. initial_image → Wan
+    2. Wan → last_video (VideoSegmentExtender)
+    3. VideoSegmentExtender → next_image → Wan
+    4. Loop até finalizar
+    5. Node gera final_video.mp4 concatenado
+
+    Inputs:
+    -------
+    initial_image : IMAGE (torch.Tensor)
+        Imagem inicial no formato [B, H, W, C], float32, valores 0-1.
+
+    project_name : STRING
+        Nome da pasta dentro de ComfyUI/output onde os segmentos serão salvos.
+
+    total_seconds : INT
+        Duração total desejada do vídeo final.
+
+    segment_seconds : INT
+        Duração de cada segmento gerado por vez.
+
+    fps : INT
+        Frames por segundo utilizados ao salvar os segmentos.
+
+    last_video : VIDEO (opcional)
+        Tensor de vídeo retornado pelo modelo (ex: Wan).
+        Pode estar no formato:
+            - [F, H, W, C]
+            - [B, F, H, W, C]
+        O node automaticamente trata batch dimension.
+
+    Outputs:
+    --------
+    next_image : IMAGE
+        Frame que deve ser usado como entrada para o próximo segmento.
+
+    current_segment : INT
+        Número atual de segmentos já gerados.
+
+    finished : BOOLEAN
+        Indica se o total de segmentos já foi atingido.
+
+    final_video_path : STRING
+        Caminho completo do vídeo final concatenado.
+        Retorna string vazia até que o processo esteja concluído.
+
+    Características Técnicas:
+    --------------------------
+    - Salva vídeos usando ffmpeg via pipe (baixo uso de memória).
+    - Extrai último frame usando ffmpeg (-sseof).
+    - Não mantém vídeos em RAM após salvar.
+    - Compatível com GPUs fracas.
+    - Resistente a crash (segmentos já salvos permanecem).
+    - Garante tipos compatíveis com validação do ComfyUI.
+
+    Requisitos:
+    -----------
+    - ffmpeg instalado e acessível no PATH do sistema.
+    - ComfyUI com suporte a tipo VIDEO.
+
+    Observações:
+    ------------
+    - Sempre reiniciar o ComfyUI após modificar INPUT_TYPES ou RETURN_TYPES.
+    - Caso o workflow já tenha o node antigo, remover e adicionar novamente.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
