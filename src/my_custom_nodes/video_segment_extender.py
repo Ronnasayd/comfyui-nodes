@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 
 
-class WanSegmentStitcher:
+class VideoSegmentExtender:
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -26,7 +26,7 @@ class WanSegmentStitcher:
     RETURN_NAMES = ("next_image", "current_segment", "finished", "final_video_path")
 
     FUNCTION = "process"
-    CATEGORY = "WanTools"
+    CATEGORY = "MYNodes"
 
     def process(
         self,
