@@ -3,6 +3,7 @@ import subprocess
 
 import folder_paths
 import numpy as np
+import torch
 from PIL import Image
 
 
@@ -16,9 +17,10 @@ class VideoSegmentExtender:
                 "project_name": ("STRING", {"default": "wan_project"}),
                 "total_seconds": ("INT", {"default": 6, "min": 2, "max": 600}),
                 "segment_seconds": ("INT", {"default": 2, "min": 1, "max": 10}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
             },
             "optional": {
-                "last_video_path": ("STRING",),
+                "last_video": ("VIDEO",),
             },
         }
 
@@ -34,7 +36,8 @@ class VideoSegmentExtender:
         project_name,
         total_seconds,
         segment_seconds,
-        last_video_path=None,
+        fps,
+        last_video=None,
     ):
 
         base_output = folder_paths.get_output_directory()
@@ -53,37 +56,91 @@ class VideoSegmentExtender:
 
         current_segment = len(existing_segments)
 
-        # Se recebeu novo vídeo, mover para pasta do projeto
-        if last_video_path and os.path.exists(last_video_path):
+        # 🔹 Se recebeu vídeo → salvar imediatamente
+        if last_video is not None:
+
             new_name = f"segment_{current_segment:03d}.mp4"
             new_path = os.path.join(project_path, new_name)
 
-            os.replace(last_video_path, new_path)
+            self.save_video_tensor(last_video, new_path, fps)
 
             current_segment += 1
-            existing_segments.append(new_name)
 
-        # Verifica se terminou
+            # liberar memória
+            del last_video
+            torch.cuda.empty_cache()
+
+        # 🔹 Se terminou todos segmentos
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
             self.concat_videos(project_path, final_video)
             return (initial_image, current_segment, True, final_video)
 
-        # Se nenhum segmento ainda → usar imagem inicial
+        # 🔹 Se nenhum segmento ainda
         if current_segment == 0:
             return (initial_image, current_segment, False, "")
 
-        # Extrair último frame do último segmento
-        last_segment_path = os.path.join(project_path, existing_segments[-1])
+        # 🔹 Extrair último frame do último segmento salvo
+        last_segment_path = os.path.join(
+            project_path, f"segment_{current_segment-1:03d}.mp4"
+        )
+
         frame = self.extract_last_frame_ffmpeg(last_segment_path, project_path)
 
         return (frame, current_segment, False, "")
+
+    def save_video_tensor(self, video_tensor, output_path, fps):
+        """
+        Salva VIDEO (tensor) como mp4 usando ffmpeg pipe.
+        VIDEO no Comfy normalmente é:
+        [frames, height, width, channels]
+        """
+
+        frames = video_tensor.cpu().numpy()
+        frames = (frames * 255).astype(np.uint8)
+
+        height, width = frames.shape[1], frames.shape[2]
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-an",
+            "-vcodec",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            output_path,
+        ]
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        for frame in frames:
+            process.stdin.write(frame.tobytes())
+
+        process.stdin.close()
+        process.wait()
 
     def extract_last_frame_ffmpeg(self, video_path, project_path):
 
         temp_frame_path = os.path.join(project_path, "last_frame.png")
 
-        # Extrai último frame com ffmpeg (leve e estável)
         cmd = [
             "ffmpeg",
             "-sseof",
