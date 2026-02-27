@@ -60,9 +60,20 @@ def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
     return torch.from_numpy(np_img).float()
 
 
-def _save_video_tensor(video_tensor: torch.Tensor, output_path: str, fps: int) -> None:
-    """Salva tensor de vídeo como arquivo .mp4 via ffmpeg pipe."""
-    tensor = video_tensor.detach().cpu()
+def _save_video_tensor(video_input, output_path: str, fps: int) -> None:
+    """Salva VIDEO (tensor ou VideoInput) como arquivo .mp4 via ffmpeg pipe."""
+
+    # ComfyUI moderno: VIDEO é um objeto VideoInput (VideoFromComponents / VideoFromFile)
+    # com método get_components() que retorna VideoComponents.images [F, H, W, C]
+    if hasattr(video_input, "get_components"):
+        components = video_input.get_components()
+        tensor = components.images.detach().cpu()
+        # Se fps não foi especificado ou queremos preservar o original, é possível usar
+        # components.frame_rate, mas respeitamos o fps passado pelo usuário.
+    elif isinstance(video_input, torch.Tensor):
+        tensor = video_input.detach().cpu()
+    else:
+        raise TypeError(f"Tipo de VIDEO não suportado: {type(video_input)}")
 
     if tensor.dim() == 5:
         tensor = tensor[0]  # [B, F, H, W, C] → [F, H, W, C]
