@@ -213,23 +213,29 @@ def _trim_video_at_offset(
         offset_percent: Percentual onde cortar (ex: 90.0 = manter 90% do vídeo)
     """
     # Obter duração do vídeo
-    duration_cmd = [
+    probe_cmd = [
         "ffprobe",
         "-v",
         "error",
+        "-select_streams",
+        "v:0",
         "-show_entries",
-        "format=duration",
+        "stream=duration",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         input_path,
     ]
-    result = subprocess.run(duration_cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(probe_cmd, capture_output=True, text=True, check=False)
     duration = float(result.stdout.strip())
+
+    if not duration:
+        raise RuntimeError(f"Não foi possível obter duração de: {input_path}")
 
     # Calcular duração cortada
     trim_duration = duration * (offset_percent / 100.0)
 
-    # Cortar vídeo
+    # Cortar vídeo com re-encode para precisão de frame
+    # Usa libx264 com preset fast para balance entre velocidade e qualidade
     cmd = [
         "ffmpeg",
         "-y",
@@ -237,8 +243,16 @@ def _trim_video_at_offset(
         input_path,
         "-t",
         str(trim_duration),
-        "-c",
-        "copy",
+        "-vcodec",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-avoid_negative_ts",
+        "make_zero",
         output_path,
     ]
     subprocess.run(
@@ -313,10 +327,33 @@ def _concat_videos(
         "0",
         "-i",
         list_file,
-        "-c",
-        "copy",
-        output_path,
     ]
+
+    # Se houver cortes (offset < 100%), fazer re-encode para garantir sincronização perfeita
+    # Se não houver cortes, pode usar copy para ser mais rápido
+    if frame_offset_percent < 100.0:
+        cmd.extend(
+            [
+                "-vcodec",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                output_path,
+            ]
+        )
+    else:
+        cmd.extend(
+            [
+                "-c",
+                "copy",
+                output_path,
+            ]
+        )
+
     subprocess.run(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
     )
