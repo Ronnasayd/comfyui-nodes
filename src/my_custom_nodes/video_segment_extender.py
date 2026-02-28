@@ -122,11 +122,24 @@ def _save_video_tensor(video_input, output_path: str, fps: int) -> None:
         raise RuntimeError(f"Falha ao salvar vídeo com ffmpeg: {output_path}")
 
 
-def _concat_videos(folder: str, output_path: str) -> None:
-    """Concatena todos os segment_*.mp4 em um único vídeo final."""
+def _concat_videos(folder: str, output_path: str, include_initial: bool = True) -> None:
+    """Concatena todos os segment_*.mp4 em um único vídeo final.
+
+    Args:
+        folder: Pasta do projeto contendo os segmentos
+        output_path: Caminho do arquivo final
+        include_initial: Se True, inclui initial_video.mp4 no início (se existir)
+    """
     list_file = os.path.join(folder, "concat_list.txt")
 
     with open(list_file, "w", encoding="utf-8") as f:
+        # Inclui vídeo inicial se existir
+        if include_initial:
+            initial_video = os.path.join(folder, "initial_video.mp4")
+            if os.path.exists(initial_video):
+                f.write(f"file '{initial_video}'\n")
+
+        # Adiciona os segmentos gerados
         for file in sorted(os.listdir(folder)):
             if file.startswith("segment_") and file.endswith(".mp4"):
                 f.write(f"file '{os.path.join(folder, file)}'\n")
@@ -165,8 +178,14 @@ class VideoSegmentPrepare:
 
     Responsabilidade:
         Determinar qual imagem usar para gerar o PRÓXIMO segmento:
-        - Segmento 0  → retorna a initial_image fornecida.
+        - Segmento 0  → retorna a initial_image fornecida OU último frame do initial_video.
         - Segmentos N → extrai e retorna o último frame do segmento anterior.
+
+    Inputs:
+        - initial_image (opcional): Imagem inicial para começar a geração
+        - initial_video (opcional): Vídeo inicial - extrai último frame e concatena no final
+        - Se ambos fornecidos, initial_video tem prioridade
+        - Se nenhum fornecido, usa imagem preta como fallback
 
     Fluxo sem ciclo (executar a fila N vezes):
         [VideoSegmentPrepare] ──next_image──► [Wan / gerador de vídeo]
@@ -186,10 +205,14 @@ class VideoSegmentPrepare:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "initial_image": ("IMAGE",),
                 "project_name": ("STRING", {"default": "wan_project"}),
                 "total_seconds": ("INT", {"default": 6, "min": 2, "max": 600}),
                 "segment_seconds": ("INT", {"default": 2, "min": 1, "max": 10}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+            },
+            "optional": {
+                "initial_image": ("IMAGE",),
+                "initial_video": ("VIDEO",),
             },
         }
 
@@ -204,20 +227,45 @@ class VideoSegmentPrepare:
         """Força re-execução a cada enfileiramento para ler estado atualizado do disco."""
         return time.time()
 
-    def prepare(self, initial_image, project_name, total_seconds, segment_seconds):
+    def prepare(
+        self,
+        project_name,
+        total_seconds,
+        segment_seconds,
+        fps,
+        initial_image=None,
+        initial_video=None,
+    ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
         current_segment = _count_segments(project_path)
+
+        # Determinar a imagem inicial a ser usada
+        start_image = None
+
+        # Se recebeu vídeo inicial, processar uma única vez (segmento 0)
+        if initial_video is not None and current_segment == 0:
+            initial_video_path = os.path.join(project_path, "initial_video.mp4")
+            # Salvar vídeo inicial apenas se ainda não existir
+            if not os.path.exists(initial_video_path):
+                _save_video_tensor(initial_video, initial_video_path, fps)
+            # Extrair último frame do vídeo inicial
+            start_image = _extract_last_frame(initial_video_path, project_path)
+        elif initial_image is not None:
+            start_image = initial_image
+        else:
+            # Fallback: criar imagem preta se nenhum input for fornecido
+            start_image = torch.zeros((1, 512, 512, 3), dtype=torch.float32)
 
         # Todos os segmentos já gerados → retorna caminho do vídeo final
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
             final_path = final_video if os.path.exists(final_video) else ""
-            return (initial_image, int(current_segment), True, str(final_path))
+            return (start_image, int(current_segment), True, str(final_path))
 
-        # Primeiro segmento → usa imagem inicial
+        # Primeiro segmento → usa imagem inicial (de video ou image)
         if current_segment == 0:
-            return (initial_image, 0, False, "")
+            return (start_image, 0, False, "")
 
         # Segmentos seguintes → extrai último frame do segmento anterior
         last_segment_path = os.path.join(
@@ -241,6 +289,9 @@ class VideoSegmentSave:
     Responsabilidade:
         Receber o vídeo gerado pelo modelo, salvá-lo como próximo segmento
         e, quando todos os segmentos estiverem prontos, concatená-los.
+
+        Se houver initial_video.mp4 no projeto, ele será incluído no início
+        da concatenação final: [initial_video + segment_000 + segment_001 + ...]
 
     Outputs:
         saved_segment    : INT     — índice do segmento salvo
