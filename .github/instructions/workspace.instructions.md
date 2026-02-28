@@ -1,3 +1,8 @@
+---
+description: Comprehensive guide to generate code with Copilot (CODE MODE ONLY)
+applyTo: "**/*"
+---
+
 # Copilot Instructions — comfyui-node
 
 ## Project Overview
