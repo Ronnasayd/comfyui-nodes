@@ -208,7 +208,10 @@ class VideoSegmentPrepare:
                 "project_name": ("STRING", {"default": "wan_project"}),
                 "total_seconds": ("INT", {"default": 6, "min": 2, "max": 600}),
                 "segment_seconds": ("INT", {"default": 2, "min": 1, "max": 10}),
-                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+                "fps": (
+                    "FLOAT",
+                    {"default": 16.0, "min": 1.0, "max": 120.0, "step": 0.01},
+                ),
             },
             "optional": {
                 "initial_image": ("IMAGE",),
@@ -307,7 +310,10 @@ class VideoSegmentSave:
                 "project_name": ("STRING", {"default": "wan_project"}),
                 "total_seconds": ("INT", {"default": 6, "min": 2, "max": 600}),
                 "segment_seconds": ("INT", {"default": 2, "min": 1, "max": 10}),
-                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+                "fps": (
+                    "FLOAT",
+                    {"default": 16.0, "min": 1.0, "max": 120.0, "step": 0.01},
+                ),
             },
         }
 
