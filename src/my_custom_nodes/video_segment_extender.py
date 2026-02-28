@@ -202,27 +202,107 @@ def _save_video_tensor(video_input, output_path: str, fps: int) -> None:
         raise RuntimeError(f"Falha ao salvar vídeo com ffmpeg: {output_path}")
 
 
-def _concat_videos(folder: str, output_path: str, include_initial: bool = True) -> None:
+def _trim_video_at_offset(
+    input_path: str, output_path: str, offset_percent: float
+) -> None:
+    """Corta um vídeo até o ponto de offset especificado.
+
+    Args:
+        input_path: Caminho do vídeo original
+        output_path: Caminho do vídeo cortado
+        offset_percent: Percentual onde cortar (ex: 90.0 = manter 90% do vídeo)
+    """
+    # Obter duração do vídeo
+    duration_cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        input_path,
+    ]
+    result = subprocess.run(duration_cmd, capture_output=True, text=True, check=False)
+    duration = float(result.stdout.strip())
+
+    # Calcular duração cortada
+    trim_duration = duration * (offset_percent / 100.0)
+
+    # Cortar vídeo
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-t",
+        str(trim_duration),
+        "-c",
+        "copy",
+        output_path,
+    ]
+    subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+
+
+def _concat_videos(
+    folder: str,
+    output_path: str,
+    include_initial: bool = True,
+    frame_offset_percent: float = 100.0,
+) -> None:
     """Concatena todos os segment_*.mp4 em um único vídeo final.
 
     Args:
         folder: Pasta do projeto contendo os segmentos
         output_path: Caminho do arquivo final
         include_initial: Se True, inclui initial_video.mp4 no início (se existir)
+        frame_offset_percent: Percentual de offset usado na extração de frames.
+            Se < 100%, os segmentos (exceto o último) serão cortados nesse ponto
+            para evitar frames redundantes que não foram usados como base.
     """
     list_file = os.path.join(folder, "concat_list.txt")
+    trimmed_folder = os.path.join(folder, "trimmed")
+    os.makedirs(trimmed_folder, exist_ok=True)
+
+    # Coletar todos os segmentos
+    segments = sorted(
+        [
+            f
+            for f in os.listdir(folder)
+            if f.startswith("segment_") and f.endswith(".mp4")
+        ]
+    )
 
     with open(list_file, "w", encoding="utf-8") as f:
         # Inclui vídeo inicial se existir
         if include_initial:
             initial_video = os.path.join(folder, "initial_video.mp4")
             if os.path.exists(initial_video):
-                f.write(f"file '{initial_video}'\n")
+                # Cortar vídeo inicial se offset < 100%
+                if frame_offset_percent < 100.0:
+                    trimmed_initial = os.path.join(trimmed_folder, "initial_video.mp4")
+                    _trim_video_at_offset(
+                        initial_video, trimmed_initial, frame_offset_percent
+                    )
+                    f.write(f"file '{trimmed_initial}'\n")
+                else:
+                    f.write(f"file '{initial_video}'\n")
 
         # Adiciona os segmentos gerados
-        for file in sorted(os.listdir(folder)):
-            if file.startswith("segment_") and file.endswith(".mp4"):
-                f.write(f"file '{os.path.join(folder, file)}'\n")
+        for i, segment_file in enumerate(segments):
+            segment_path = os.path.join(folder, segment_file)
+            is_last_segment = i == len(segments) - 1
+
+            # Cortar segmentos (exceto o último) se offset < 100%
+            if not is_last_segment and frame_offset_percent < 100.0:
+                trimmed_path = os.path.join(trimmed_folder, segment_file)
+                _trim_video_at_offset(segment_path, trimmed_path, frame_offset_percent)
+                f.write(f"file '{trimmed_path}'\n")
+            else:
+                # Último segmento ou sem offset: usar arquivo original
+                f.write(f"file '{segment_path}'\n")
 
     cmd = [
         "ffmpeg",
@@ -410,6 +490,13 @@ class VideoSegmentSave:
         Se houver initial_video.mp4 no projeto, ele será incluído no início
         da concatenação final: [initial_video + segment_000 + segment_001 + ...]
 
+    Concatenação Inteligente:
+        - Se frame_offset_percent < 100%, os vídeos (exceto o último) serão cortados
+          no ponto de offset antes da concatenação
+        - Isso remove os frames finais que não foram usados como base para o próximo segmento
+        - Exemplo: offset=90% → cada vídeo é cortado em 90% antes de concatenar
+        - Resultado: transição suave sem frames redundantes
+
     Outputs:
         saved_segment    : INT     — índice do segmento salvo
         finished         : BOOLEAN — True se todos os segmentos foram gerados
@@ -428,6 +515,10 @@ class VideoSegmentSave:
                     "FLOAT",
                     {"default": 16.0, "min": 1.0, "max": 120.0, "step": 0.01},
                 ),
+                "frame_offset_percent": (
+                    "FLOAT",
+                    {"default": 90.0, "min": 50.0, "max": 100.0, "step": 1.0},
+                ),
             },
         }
 
@@ -438,7 +529,15 @@ class VideoSegmentSave:
     OUTPUT_NODE = True
     CATEGORY = "MYNodes/VideoSegment"
 
-    def save(self, video, project_name, total_seconds, segment_seconds, fps):
+    def save(
+        self,
+        video,
+        project_name,
+        total_seconds,
+        segment_seconds,
+        fps,
+        frame_offset_percent,
+    ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
         current_segment = _count_segments(project_path)
@@ -454,7 +553,12 @@ class VideoSegmentSave:
         # Verifica se finalizou e concatena
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
-            _concat_videos(project_path, final_video)
+            _concat_videos(
+                project_path,
+                final_video,
+                include_initial=True,
+                frame_offset_percent=frame_offset_percent,
+            )
             return (int(current_segment), True, str(final_video))
 
         return (int(current_segment), False, "")
