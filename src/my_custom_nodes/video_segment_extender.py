@@ -60,6 +60,132 @@ def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
     return torch.from_numpy(np_img).float()
 
 
+def _extract_first_frame(video_path: str, project_path: str) -> torch.Tensor:
+    """Extrai o primeiro frame de um vídeo via ffmpeg e retorna tensor IMAGE."""
+    temp_frame_path = os.path.join(project_path, "first_frame.png")
+
+    cmd = [
+        "ffmpeg",
+        "-i",
+        video_path,
+        "-vframes",
+        "1",
+        "-q:v",
+        "1",
+        "-y",
+        temp_frame_path,
+    ]
+    subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+
+    if not os.path.exists(temp_frame_path):
+        raise RuntimeError(f"Falha ao extrair primeiro frame de: {video_path}")
+
+    img = Image.open(temp_frame_path).convert("RGB")
+    np_img = np.array(img).astype(np.float32) / 255.0
+    np_img = np.expand_dims(np_img, 0)
+    return torch.from_numpy(np_img).float()
+
+
+def _generate_transition_frames(
+    frame1: torch.Tensor, frame2: torch.Tensor, num_frames: int
+) -> np.ndarray:
+    """Gera frames de transição interpolando gradualmente entre dois frames.
+
+    Args:
+        frame1: Tensor IMAGE [1, H, W, C] - frame inicial
+        frame2: Tensor IMAGE [1, H, W, C] - frame final
+        num_frames: Número de frames de transição a gerar
+
+    Returns:
+        Array numpy [num_frames, H, W, C] com frames interpolados
+    """
+    # Converter para numpy e remover dimensão batch
+    np_frame1 = frame1.squeeze(0).numpy()
+    np_frame2 = frame2.squeeze(0).numpy()
+
+    # Gerar pesos de interpolação linear
+    # Ex: num_frames=3 -> weights = [0.25, 0.5, 0.75]
+    weights = np.linspace(0, 1, num_frames + 2)[1:-1]
+
+    transition_frames = []
+    for weight in weights:
+        # Blend linear: frame1 * (1 - weight) + frame2 * weight
+        blended = np_frame1 * (1 - weight) + np_frame2 * weight
+        transition_frames.append(blended)
+
+    return np.array(transition_frames)
+
+
+def _create_transition_video(
+    video1_path: str,
+    video2_path: str,
+    output_path: str,
+    project_path: str,
+    num_frames: int,
+    fps: int,
+) -> None:
+    """Cria um pequeno vídeo de transição entre dois segmentos.
+
+    Args:
+        video1_path: Caminho do primeiro vídeo (extrai último frame)
+        video2_path: Caminho do segundo vídeo (extrai primeiro frame)
+        output_path: Caminho do vídeo de transição a ser criado
+        project_path: Pasta temporária para trabalho
+        num_frames: Número de frames de transição
+        fps: Taxa de frames por segundo
+    """
+    # Extrair frames extremos
+    last_frame = _extract_last_frame(video1_path, project_path)
+    first_frame = _extract_first_frame(video2_path, project_path)
+
+    # Gerar frames de transição
+    transition_frames = _generate_transition_frames(last_frame, first_frame, num_frames)
+
+    # Converter para uint8
+    frames_uint8 = (transition_frames * 255.0).clip(0, 255).astype(np.uint8)
+    height, width = frames_uint8.shape[1], frames_uint8.shape[2]
+
+    # Salvar como vídeo via ffmpeg pipe
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+        "-an",
+        "-vcodec",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        output_path,
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for frame in frames_uint8:
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    proc.wait()
+
+    if not os.path.exists(output_path):
+        raise RuntimeError(f"Falha ao criar vídeo de transição: {output_path}")
+
+
 def _extract_blended_frame(
     video_path: str,
     project_path: str,
@@ -265,6 +391,8 @@ def _concat_videos(
     output_path: str,
     include_initial: bool = True,
     frame_offset_percent: float = 100.0,
+    transition_frames: int = 0,
+    fps: int = 16,
 ) -> None:
     """Concatena todos os segment_*.mp4 em um único vídeo final.
 
@@ -275,10 +403,14 @@ def _concat_videos(
         frame_offset_percent: Percentual de offset usado na extração de frames.
             Se < 100%, os segmentos (exceto o último) serão cortados nesse ponto
             para evitar frames redundantes que não foram usados como base.
+        transition_frames: Número de frames de transição a gerar entre segmentos (0 = sem transição)
+        fps: Taxa de frames por segundo para os vídeos de transição
     """
     list_file = os.path.join(folder, "concat_list.txt")
     trimmed_folder = os.path.join(folder, "trimmed")
+    transitions_folder = os.path.join(folder, "transitions")
     os.makedirs(trimmed_folder, exist_ok=True)
+    os.makedirs(transitions_folder, exist_ok=True)
 
     # Coletar todos os segmentos
     segments = sorted(
@@ -290,6 +422,8 @@ def _concat_videos(
     )
 
     with open(list_file, "w", encoding="utf-8") as f:
+        prev_video_path = None
+
         # Inclui vídeo inicial se existir
         if include_initial:
             initial_video = os.path.join(folder, "initial_video.mp4")
@@ -301,22 +435,43 @@ def _concat_videos(
                         initial_video, trimmed_initial, frame_offset_percent
                     )
                     f.write(f"file '{trimmed_initial}'\n")
+                    prev_video_path = trimmed_initial
                 else:
                     f.write(f"file '{initial_video}'\n")
+                    prev_video_path = initial_video
 
-        # Adiciona os segmentos gerados
+        # Adiciona os segmentos gerados com transições
         for i, segment_file in enumerate(segments):
             segment_path = os.path.join(folder, segment_file)
             is_last_segment = i == len(segments) - 1
 
-            # Cortar segmentos (exceto o último) se offset < 100%
+            # Determinar qual caminho usar (original ou cortado)
             if not is_last_segment and frame_offset_percent < 100.0:
-                trimmed_path = os.path.join(trimmed_folder, segment_file)
-                _trim_video_at_offset(segment_path, trimmed_path, frame_offset_percent)
-                f.write(f"file '{trimmed_path}'\n")
+                current_video_path = os.path.join(trimmed_folder, segment_file)
+                _trim_video_at_offset(
+                    segment_path, current_video_path, frame_offset_percent
+                )
             else:
-                # Último segmento ou sem offset: usar arquivo original
-                f.write(f"file '{segment_path}'\n")
+                current_video_path = segment_path
+
+            # Gerar vídeo de transição se necessário
+            if transition_frames > 0 and prev_video_path is not None:
+                transition_path = os.path.join(
+                    transitions_folder, f"transition_{i:03d}.mp4"
+                )
+                _create_transition_video(
+                    prev_video_path,
+                    current_video_path,
+                    transition_path,
+                    folder,
+                    transition_frames,
+                    fps,
+                )
+                f.write(f"file '{transition_path}'\n")
+
+            # Adicionar segmento atual
+            f.write(f"file '{current_video_path}'\n")
+            prev_video_path = current_video_path
 
     cmd = [
         "ffmpeg",
@@ -329,9 +484,8 @@ def _concat_videos(
         list_file,
     ]
 
-    # Se houver cortes (offset < 100%), fazer re-encode para garantir sincronização perfeita
-    # Se não houver cortes, pode usar copy para ser mais rápido
-    if frame_offset_percent < 100.0:
+    # Se houver cortes, transições ou offset < 100%, fazer re-encode
+    if frame_offset_percent < 100.0 or transition_frames > 0:
         cmd.extend(
             [
                 "-vcodec",
@@ -424,6 +578,10 @@ class VideoSegmentPrepare:
                 "frame_offset_percent": (
                     "FLOAT",
                     {"default": 90.0, "min": 50.0, "max": 100.0, "step": 1.0},
+                ),
+                "transition_frames": (
+                    "INT",
+                    {"default": 1, "min": 0, "max": 30, "step": 1},
                 ),
             },
             "optional": {
@@ -534,6 +692,15 @@ class VideoSegmentSave:
         - Exemplo: offset=90% → cada vídeo é cortado em 90% antes de concatenar
         - Resultado: transição suave sem frames redundantes
 
+    Transições Suaves:
+        - transition_frames: Número de frames de transição a gerar entre segmentos (0-30, padrão: 1)
+          * 0 = sem transição (corte direto)
+          * 1-5 = transição sutil entre segmentos
+          * 10+ = transição mais longa e visível
+        - Os frames de transição são gerados por interpolação linear (blend) entre o último
+          frame do segmento anterior e o primeiro frame do próximo segmento
+        - Exemplo: transition_frames=3 gera 3 frames intermediários com pesos 0.25, 0.5, 0.75
+
     Outputs:
         saved_segment    : INT     — índice do segmento salvo
         finished         : BOOLEAN — True se todos os segmentos foram gerados
@@ -556,6 +723,10 @@ class VideoSegmentSave:
                     "FLOAT",
                     {"default": 90.0, "min": 50.0, "max": 100.0, "step": 1.0},
                 ),
+                "transition_frames": (
+                    "INT",
+                    {"default": 1, "min": 0, "max": 30, "step": 1},
+                ),
             },
         }
 
@@ -574,6 +745,7 @@ class VideoSegmentSave:
         segment_seconds,
         fps,
         frame_offset_percent,
+        transition_frames,
     ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
@@ -595,6 +767,8 @@ class VideoSegmentSave:
                 final_video,
                 include_initial=True,
                 frame_offset_percent=frame_offset_percent,
+                transition_frames=transition_frames,
+                fps=int(fps),
             )
             return (int(current_segment), True, str(final_video))
 
