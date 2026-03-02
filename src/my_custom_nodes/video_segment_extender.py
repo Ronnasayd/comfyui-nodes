@@ -609,6 +609,7 @@ class VideoSegmentPrepare:
         fps,
         frame_blend_count,
         frame_offset_percent,
+        transition_frames,
         initial_image=None,
         initial_video=None,
     ):
