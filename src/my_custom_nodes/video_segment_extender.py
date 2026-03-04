@@ -342,6 +342,7 @@ class VideoSegmentPrepare:
             "optional": {
                 "initial_image": ("IMAGE",),
                 "initial_video": ("VIDEO",),
+                "latent": ("LATENT",),
                 "cache_window_size": ("INT", {"default": 4}),
                 "overlap_frames": ("INT", {"default": 8}),
             },
@@ -373,6 +374,7 @@ class VideoSegmentPrepare:
         frame_offset_percent,
         initial_image=None,
         initial_video=None,
+        latent=None,
         cache_window_size=4,
         overlap_frames=8,
     ):
@@ -391,12 +393,12 @@ class VideoSegmentPrepare:
                 current_segment,
                 True,
                 final_path if os.path.exists(final_path) else "",
-                None,
+                latent,
             )
 
         if current_segment == 0:
             if initial_image is not None:
-                return (initial_image, 0, False, "", None)
+                return (initial_image, 0, False, "", latent)
 
         last_segment = None
         if current_segment > 0:
@@ -407,9 +409,9 @@ class VideoSegmentPrepare:
             frame = _extract_blended_frame(
                 last_segment, project_path, frame_blend_count, frame_offset_percent
             )
-            return (frame, current_segment, False, "", None)
+            return (frame, current_segment, False, "", latent)
 
-        return (torch.zeros((1, 512, 512, 3)), 0, False, "", None)
+        return (torch.zeros((1, 512, 512, 3)), 0, False, "", latent)
 
 
 class VideoSegmentSave:
