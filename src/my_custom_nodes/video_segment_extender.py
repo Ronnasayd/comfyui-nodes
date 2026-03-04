@@ -1359,3 +1359,198 @@ class LatentPrependCache:
                 exc_info=True,
             )
             raise
+
+
+class LatentExtendFrames:
+    """
+    Extends a video latent to a target number of frames by repeating the last frame.
+    Useful for matching frame counts between latent_image and conditioning images.
+
+    Input:
+        - latent: Video latent tensor [B, C, F, H, W]
+        - target_frames: Desired total number of frames
+
+    Output:
+        - extended_latent: Latent with target_frames frames [B, C, target_frames, H, W]
+
+    Example:
+        Input: (1, 16, 20, 51, 85) with target_frames=28
+        Output: (1, 16, 28, 51, 85) - last frame repeated 8 times
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "target_frames": ("INT", {"default": 28, "min": 1, "max": 1000}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("extended_latent",)
+    FUNCTION = "extend_frames"
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def extend_frames(self, latent, target_frames):
+        """Extend latent to target_frames by repeating the last frame."""
+        try:
+            samples = latent["samples"]
+
+            # Validate 5D tensor [B, C, F, H, W]
+            if samples.dim() != 5:
+                raise ValueError(
+                    f"Expected 5D latent tensor [B, C, F, H, W], got {samples.dim()}D: {list(samples.shape)}"
+                )
+
+            _, _, F, _, _ = samples.shape
+
+            logger.info(
+                f"LatentExtendFrames: input={list(samples.shape)}, target_frames={target_frames}"
+            )
+
+            # If already at target, return as-is
+            if F == target_frames:
+                logger.info("Already at target frames, returning unchanged")
+                return (latent,)
+
+            # If input has more frames than target, truncate
+            if F > target_frames:
+                logger.warning(
+                    f"Input has more frames ({F}) than target ({target_frames}), truncating"
+                )
+                extended_samples = samples[:, :, :target_frames, :, :]
+                logger.info(f"Truncated to: {list(extended_samples.shape)}")
+                return ({"samples": extended_samples},)
+
+            # Extend by repeating last frame
+            frames_to_add = target_frames - F
+            last_frame = samples[:, :, -1:, :, :]  # [B, C, 1, H, W]
+
+            # Repeat last frame
+            repeated_frames = last_frame.repeat(
+                1, 1, frames_to_add, 1, 1
+            )  # [B, C, frames_to_add, H, W]
+
+            # Concatenate original + repeated
+            extended_samples = torch.cat([samples, repeated_frames], dim=2)
+
+            logger.info(
+                f"Extended latent: {list(samples.shape)} + {frames_to_add} repeated frames → {list(extended_samples.shape)}"
+            )
+
+            return ({"samples": extended_samples},)
+
+        except Exception as e:
+            logger.error(f"Failed to extend frames: {e}", exc_info=True)
+            raise
+
+
+class ConditioningExtendFrames:
+    """
+    Extends video conditioning to a target number of frames by repeating the last frame.
+    Useful for matching frame counts between latent_image and conditioning.
+
+    Input:
+        - conditioning: CONDITIONING with embedded frame dimension
+        - target_frames: Desired total number of frames
+
+    Output:
+        - extended_conditioning: CONDITIONING with target_frames frames
+
+    Example:
+        If conditioning has 20 frames internally and target_frames=28,
+        the last frame is repeated 8 times.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "target_frames": ("INT", {"default": 28, "min": 1, "max": 1000}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("extended_conditioning",)
+    FUNCTION = "extend_frames"
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def extend_frames(self, conditioning, target_frames):
+        """Extend conditioning to target_frames by repeating the last frame."""
+        try:
+            # CONDITIONING is a list of tuples: [(cond_tensor, metadata_dict), ...]
+            extended_cond = []
+
+            for cond_item in conditioning:
+                # Each item is (tensor, dict)
+                cond_tensor = cond_item[0]
+                cond_dict = cond_item[1].copy() if len(cond_item) > 1 else {}
+
+                logger.info(
+                    f"ConditioningExtendFrames: input tensor shape={list(cond_tensor.shape)}, "
+                    f"target_frames={target_frames}"
+                )
+
+                # Try to find frame dimension in the tensor
+                # Common patterns:
+                # - [B, F, ...] - batch, frames, others
+                # - [F, ...] - frames first
+                # We'll look for a dimension that could reasonably be frames (< 200)
+
+                original_shape = cond_tensor.shape
+
+                # Check if tensor has a temporal dimension we can extend
+                # For video models, conditioning often has shape like [B, F, D] or [B, F, H, W]
+                if cond_tensor.dim() >= 2:
+                    # Assume frame dimension is at index 1 (after batch)
+                    # This matches CogVideoX/Wan conditioning format: [B, F, ...]
+                    current_frames = cond_tensor.shape[1]
+
+                    logger.info(f"Detected {current_frames} frames in dimension 1")
+
+                    if current_frames == target_frames:
+                        logger.info("Already at target frames, returning unchanged")
+                        extended_cond.append(cond_item)
+                        continue
+
+                    if current_frames > target_frames:
+                        logger.warning(
+                            f"Conditioning has more frames ({current_frames}) than target ({target_frames}), truncating"
+                        )
+                        extended_tensor = cond_tensor[:, :target_frames, ...]
+                    else:
+                        # Extend by repeating last frame
+                        frames_to_add = target_frames - current_frames
+                        last_frame = cond_tensor[:, -1:, ...]  # Keep dimension
+
+                        # Repeat last frame
+                        repeated_frames = last_frame.repeat(
+                            1, frames_to_add, *([1] * (cond_tensor.dim() - 2))
+                        )
+
+                        # Concatenate
+                        extended_tensor = torch.cat(
+                            [cond_tensor, repeated_frames], dim=1
+                        )
+
+                    logger.info(
+                        f"Extended conditioning: {list(original_shape)} → {list(extended_tensor.shape)}"
+                    )
+
+                    # Create new conditioning item
+                    extended_cond.append((extended_tensor, cond_dict))
+                else:
+                    # Tensor doesn't have frame dimension, keep as-is
+                    logger.warning(
+                        f"Conditioning tensor has only {cond_tensor.dim()} dimensions, "
+                        "cannot extend frames. Returning unchanged."
+                    )
+                    extended_cond.append(cond_item)
+
+            return (extended_cond,)
+
+        except Exception as e:
+            logger.error(f"Failed to extend conditioning frames: {e}", exc_info=True)
+            raise
