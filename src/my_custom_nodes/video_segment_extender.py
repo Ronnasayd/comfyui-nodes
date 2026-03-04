@@ -84,24 +84,45 @@ def _validate_positive(value, name):
 
 
 def _get_project_path(project_name: str) -> str:
+    """Get the project directory path, creating it if it doesn't exist."""
     base_output = folder_paths.get_output_directory()
     project_path = os.path.join(base_output, project_name)
     os.makedirs(project_path, exist_ok=True)
+
+    logger.debug(
+        f"Project path: base={base_output}, "
+        f"project={project_name}, "
+        f"full_path={project_path}"
+    )
+
     return project_path
 
 
 def _list_segments(project_path: str) -> List[str]:
-    segments = [
-        f
-        for f in os.listdir(project_path)
-        if f.startswith("segment_") and f.endswith(".mp4")
-    ]
-    segments.sort()
-    return segments
+    """List all segment video files in the project directory."""
+    if not os.path.exists(project_path):
+        logger.warning(f"Project path does not exist: {project_path}")
+        return []
+
+    try:
+        all_files = os.listdir(project_path)
+        segments = [
+            f for f in all_files if f.startswith("segment_") and f.endswith(".mp4")
+        ]
+        segments.sort()
+
+        logger.debug(f"Found {len(segments)} segment(s) in {project_path}: {segments}")
+        return segments
+    except Exception as e:
+        logger.error(f"Error listing segments in {project_path}: {e}", exc_info=True)
+        return []
 
 
 def _count_segments(project_path: str) -> int:
-    return len(_list_segments(project_path))
+    """Count the number of saved video segments."""
+    count = len(_list_segments(project_path))
+    logger.info(f"Segment count for {os.path.basename(project_path)}: {count}")
+    return count
 
 
 # ============================================================
@@ -766,7 +787,12 @@ class VideoSegmentPrepare:
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        return hash(tuple(sorted(kwargs.items())))
+        """Force re-execution on every queue run to check for new segments."""
+        import time
+
+        # Return current timestamp to force re-execution
+        # This ensures the node checks for new segments on each run
+        return time.time()
 
     def prepare(
         self,
@@ -802,11 +828,21 @@ class VideoSegmentPrepare:
 
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
+
+        # Count existing segments with detailed logging
         current_segment = _count_segments(project_path)
+
+        logger.info(
+            f"VideoSegmentPrepare: project={project_name}, "
+            f"path={project_path}, "
+            f"current_segment={current_segment}, "
+            f"max_segments={max_segments}"
+        )
 
         # Check if generation is complete
         if current_segment >= max_segments:
             final_path = os.path.join(project_path, "final_video.mp4")
+            logger.info(f"All segments completed ({current_segment}/{max_segments})")
             return (
                 initial_image,
                 current_segment,
@@ -820,6 +856,9 @@ class VideoSegmentPrepare:
             if initial_image is not None:
                 logger.info("Segment 0: Using initial_image, no cached latent")
                 return (initial_image, 0, False, "", None)
+            else:
+                logger.warning("Segment 0: No initial_image provided, using fallback")
+                return (torch.zeros((1, 512, 512, 3)), 0, False, "", None)
 
         # Subsequent segments: extract blended frame and load cached latent
         cached_latent = None
@@ -917,12 +956,33 @@ class VideoSegmentSave:
         seg_index = len(segments)
         seg_path = os.path.join(project_path, f"segment_{seg_index:03d}.mp4")
 
+        logger.info(
+            f"VideoSegmentSave: project={project_name}, "
+            f"seg_index={seg_index}, "
+            f"max_segments={max_segments}, "
+            f"existing_segments={len(segments)}, "
+            f"target_path={seg_path}"
+        )
+
         if os.path.exists(seg_path):
+            logger.error(f"Segment file already exists: {seg_path}")
             raise RuntimeError("Segment overwrite prevented")
 
         # Save video segment
         _save_video_tensor(video, seg_path, fps)
-        logger.info(f"Saved video segment {seg_index} to {seg_path}")
+
+        # Verify the file was actually saved
+        if os.path.exists(seg_path):
+            file_size = os.path.getsize(seg_path)
+            logger.info(
+                f"Successfully saved segment {seg_index} to {seg_path} "
+                f"({file_size / 1024 / 1024:.2f} MB)"
+            )
+        else:
+            logger.error(
+                f"Failed to save segment {seg_index}: file not found after save"
+            )
+            raise RuntimeError(f"Video segment file not created: {seg_path}")
 
         # Cache latent frames for next segment (if overlap_frames > 0)
         if overlap_frames > 0 and latent is not None:
