@@ -361,7 +361,15 @@ def _cleanup_old_caches(project_path: str, keep_last_n: int = 2) -> None:
 
 
 def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
+    """Extract the last frame from a video file."""
+
+    if not os.path.exists(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        raise RuntimeError(f"Video file not found: {video_path}")
+
     temp_frame = os.path.join(project_path, "last_frame.png")
+
+    logger.debug(f"Extracting last frame from {os.path.basename(video_path)}")
 
     cmd = [
         "ffmpeg",
@@ -378,8 +386,10 @@ def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
     _run_subprocess(cmd, "Failed extracting last frame")
 
     if not os.path.exists(temp_frame):
+        logger.error(f"Last frame file not created: {temp_frame}")
         raise RuntimeError("Last frame not created")
 
+    logger.debug(f"Loading last frame from {temp_frame}")
     with Image.open(temp_frame) as img:
         arr = np.array(img.convert("RGB")).astype(np.float32) / 255.0
 
@@ -388,44 +398,126 @@ def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
 
 
 def _extract_blended_frame(video_path, project_path, blend_count, offset_percent):
-    duration = _get_video_duration(video_path)
+    """Extract and blend multiple frames from a video for smooth transitions."""
 
+    # Validate video file exists
+    if not os.path.exists(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        raise RuntimeError(f"Video file not found: {video_path}")
+
+    # Get video info
+    duration = _get_video_duration(video_path)
+    file_size = os.path.getsize(video_path)
+
+    logger.info(
+        f"Extracting blended frames from {os.path.basename(video_path)}: "
+        f"duration={duration:.2f}s, size={file_size / 1024:.1f}KB, "
+        f"blend_count={blend_count}, offset={offset_percent}%"
+    )
+
+    # Calculate start time for extraction
     offset_percent = max(0.0, min(offset_percent, 99.0))
     start_time = duration * (offset_percent / 100.0)
-    start_time = min(start_time, max(0.0, duration - 0.05))
+
+    # Ensure we don't try to extract beyond the video duration
+    # Leave at least 0.1s margin to ensure we can extract frames
+    max_start_time = max(0.0, duration - 0.2)
+    start_time = min(start_time, max_start_time)
+
+    logger.debug(
+        f"Calculated start_time={start_time:.3f}s "
+        f"(duration={duration:.3f}s, offset={offset_percent}%)"
+    )
 
     frames_dir = os.path.join(project_path, "blend_frames")
     os.makedirs(frames_dir, exist_ok=True)
 
-    for f in os.listdir(frames_dir):
+    # Clean up old frames
+    old_frames = [f for f in os.listdir(frames_dir) if f.endswith(".png")]
+    for f in old_frames:
         os.remove(os.path.join(frames_dir, f))
+    logger.debug(f"Cleaned {len(old_frames)} old frames from {frames_dir}")
 
     frame_pattern = os.path.join(frames_dir, "frame_%03d.png")
 
+    # Move -ss AFTER -i for better compatibility
     cmd = [
         "ffmpeg",
-        "-ss",
-        str(start_time),
         "-i",
         video_path,
+        "-ss",
+        str(start_time),
         "-vframes",
         str(blend_count),
+        "-q:v",
+        "2",  # High quality
         "-y",
         frame_pattern,
     ]
 
-    _run_subprocess(cmd, "Failed extracting blended frames")
+    logger.info(f"Running ffmpeg: {' '.join(cmd)}")
+
+    try:
+        result = _run_subprocess(cmd, "Failed extracting blended frames")
+        logger.debug(
+            f"ffmpeg stdout: {result.stdout[:200] if result.stdout else 'empty'}"
+        )
+        logger.debug(
+            f"ffmpeg stderr: {result.stderr[:200] if result.stderr else 'empty'}"
+        )
+    except Exception as e:
+        logger.error(f"ffmpeg command failed: {e}")
+        raise
+
+    # Check what frames were actually created
+    try:
+        created_files = sorted(
+            [
+                f
+                for f in os.listdir(frames_dir)
+                if f.startswith("frame_") and f.endswith(".png")
+            ]
+        )
+    except Exception as e:
+        logger.error(f"Error listing frames directory: {e}")
+        created_files = []
+
+    logger.info(
+        f"Created {len(created_files)} frame files in {frames_dir}: {created_files}"
+    )
 
     frames = []
-    for i in range(1, blend_count + 1):
-        frame_path = os.path.join(frames_dir, f"frame_{i:03d}.png")
-        if os.path.exists(frame_path):
-            with Image.open(frame_path) as img:
-                frames.append(np.array(img.convert("RGB")).astype(np.float32) / 255.0)
+    # Try to load frames with different naming patterns
+    for i in range(1, blend_count + 2):  # Try a few extra indices
+        for fmt in [f"frame_{i:03d}.png", f"frame_{i:01d}.png", f"frame_{i:02d}.png"]:
+            frame_path = os.path.join(frames_dir, fmt)
+            if os.path.exists(frame_path):
+                try:
+                    logger.debug(f"Loading frame: {fmt}")
+                    with Image.open(frame_path) as img:
+                        frames.append(
+                            np.array(img.convert("RGB")).astype(np.float32) / 255.0
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load {fmt}: {e}")
+                break
 
     if not frames:
-        raise RuntimeError("No blended frames extracted")
+        error_msg = (
+            f"No blended frames extracted! "
+            f"video={os.path.basename(video_path)}, "
+            f"duration={duration:.2f}s, "
+            f"start_time={start_time:.2f}s, "
+            f"requested_frames={blend_count}, "
+            f"frames_dir={frames_dir}, "
+            f"files_created={created_files}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(
+            f"No blended frames extracted from {os.path.basename(video_path)}"
+        )
 
+    logger.info(f"Successfully loaded {len(frames)} frames for blending")
     avg_frame = np.mean(frames, axis=0)
     avg_frame = np.expand_dims(avg_frame, 0)
     return torch.from_numpy(avg_frame).float()
@@ -886,12 +978,33 @@ class VideoSegmentPrepare:
 
         # Extract blended frame from previous segment
         if last_segment:
-            frame = _extract_blended_frame(
-                last_segment, project_path, frame_blend_count, frame_offset_percent
-            )
-            logger.info(
-                f"Segment {current_segment}: Extracted blended frame from {last_segment}"
-            )
+            try:
+                frame = _extract_blended_frame(
+                    last_segment, project_path, frame_blend_count, frame_offset_percent
+                )
+                logger.info(
+                    f"Segment {current_segment}: Extracted blended frame from "
+                    f"{os.path.basename(last_segment)}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Blended frame extraction failed, trying last frame fallback: {e}"
+                )
+                try:
+                    frame = _extract_last_frame(last_segment, project_path)
+                    logger.info(
+                        f"Segment {current_segment}: Using last frame from "
+                        f"{os.path.basename(last_segment)} (fallback)"
+                    )
+                except Exception as e2:
+                    logger.error(
+                        f"Both blended and last frame extraction failed: {e2}",
+                        exc_info=True,
+                    )
+                    # Final fallback: use a black frame
+                    logger.warning("Using black frame as final fallback")
+                    frame = torch.zeros((1, 512, 512, 3))
+
             return (frame, current_segment, False, "", cached_latent)
 
         # Fallback (should rarely happen)
