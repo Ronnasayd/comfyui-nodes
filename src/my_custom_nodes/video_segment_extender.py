@@ -482,3 +482,60 @@ class VideoSegmentSave:
             return (seg_index, True, final_path)
 
         return (seg_index, False, "")
+
+
+class LatentShapeDebug:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"latent": ("LATENT",)}}
+
+    RETURN_TYPES = ("STRING", "LATENT")
+    RETURN_NAMES = ("shape_info", "latent")
+
+    FUNCTION = "debug_shape"
+    OUTPUT_NODE = True
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def debug_shape(self, latent):
+        if latent is None:
+            info = "Latent is None"
+            logger.info(info)
+            return (info, latent)
+
+        if not isinstance(latent, dict):
+            info = f"Unexpected latent type: {type(latent)}"
+            logger.warning(info)
+            return (info, latent)
+
+        samples = latent.get("samples")
+        if samples is None:
+            info = "No 'samples' key in latent dictionary"
+            logger.warning(info)
+            return (info, latent)
+
+        if not isinstance(samples, torch.Tensor):
+            info = f"'samples' is not a tensor (type={type(samples)})"
+            logger.warning(info)
+            return (info, latent)
+
+        shape = tuple(samples.shape)
+        dims = samples.dim()
+        total_elements = samples.numel()
+        mem_mb = total_elements * samples.element_size() / (1024**2)
+
+        device = str(samples.device)
+        dtype = str(samples.dtype)
+
+        info = (
+            f"Shape: {shape}\n"
+            f"Dimensions: {dims}\n"
+            f"DType: {dtype}\n"
+            f"Device: {device}\n"
+            f"Total elements: {total_elements:,}\n"
+            f"Memory: {mem_mb:.2f} MB"
+        )
+
+        logger.info(info.replace("\n", " | "))
+
+        return (info, latent)
