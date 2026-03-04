@@ -861,7 +861,7 @@ class VideoSegmentPrepare:
                 "initial_video": ("VIDEO",),
                 "latent": ("LATENT",),
                 "cache_window_size": ("INT", {"default": 4}),
-                "overlap_frames": ("INT", {"default": 8}),
+                "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
             },
         }
 
@@ -898,18 +898,43 @@ class VideoSegmentPrepare:
         initial_video=None,
         latent=None,
         cache_window_size=4,
-        overlap_frames=8,
+        overlap_frames=0,
     ):
         """
         Prepare the next video segment by determining the starting frame and cached latent.
+
+        IMPORTANT - How to use cached_latent:
+
+        The cached_latent output contains the last N frames from the previous segment
+        for temporal consistency. There are TWO ways to use it:
+
+        OPTION 1 - Simple Mode (RECOMMENDED):
+            Set overlap_frames=0 to disable latent caching completely.
+            This makes the workflow simpler and avoids concatenation issues.
+
+        OPTION 2 - Advanced Mode with Temporal Consistency:
+            Set overlap_frames > 0 (e.g., 8) to enable latent caching.
+
+            DO NOT use standard LatentBatch/Concatenate nodes!
+
+            Instead, you need to:
+            a) For SVD (Stable Video Diffusion):
+               - Ignore the cached_latent (it's informational only)
+               - Use the blended image for temporal smoothness
+
+            b) For other models with latent conditioning:
+               - Verify the cached_latent shape matches your model's expectations
+               - Use model-specific conditioning nodes to prepend frames
+
+            c) OR set overlap_frames=0 and only use image-based conditioning
 
         This method:
         1. Determines the current segment index
         2. For segment 0: returns initial_image (if provided) with no cached latent
         3. For segments 1+:
            - Extracts a blended frame from the previous segment as the starting image
-           - Loads cached latent frames from the previous segment for temporal consistency
-           - Returns the cached latent to be prepended to the next generation
+           - Loads cached latent frames from the previous segment (if overlap_frames > 0)
+           - Returns the cached latent output (may be None)
         4. Returns finished=True when all segments are complete
 
         Returns:
@@ -1005,6 +1030,17 @@ class VideoSegmentPrepare:
                     logger.warning("Using black frame as final fallback")
                     frame = torch.zeros((1, 512, 512, 3))
 
+            # Warn about cached_latent usage if it's not None
+            if cached_latent is not None:
+                logger.warning(
+                    f"⚠️  cached_latent returned with shape: "
+                    f"{cached_latent['samples'].shape}. "
+                    f"If you get concatenation errors, set overlap_frames=0 in both "
+                    f"VideoSegmentPrepare and VideoSegmentSave to disable latent caching. "
+                    f"For most workflows, image-based conditioning (blended frame) "
+                    f"is sufficient for temporal smoothness."
+                )
+
             return (frame, current_segment, False, "", cached_latent)
 
         # Fallback (should rarely happen)
@@ -1028,8 +1064,8 @@ class VideoSegmentSave:
             },
             "optional": {
                 "latent": ("LATENT",),
-                "overlap_frames": ("INT", {"default": 8}),
-                "crossfade_frames": ("INT", {"default": 0}),
+                "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
+                "crossfade_frames": ("INT", {"default": 0, "min": 0, "max": 16}),
             },
         }
 
@@ -1050,7 +1086,7 @@ class VideoSegmentSave:
         frame_offset_percent,
         remove_duplicate_frames,
         latent=None,
-        overlap_frames=8,
+        overlap_frames=0,
         crossfade_frames=0,
     ):
         """
@@ -1206,3 +1242,120 @@ class LatentShapeDebug:
         logger.info(info.replace("\n", " | "))
 
         return (info, latent)
+
+
+class LatentPrependCache:
+    """
+    Prepend cached latent frames to a new latent for temporal consistency.
+
+    This node correctly concatenates latents in the FRAME dimension (dim=2)
+    for 5D video latent tensors [B, C, F, H, W].
+
+    Use this to combine:
+    - cached_latent (e.g., 8 frames from previous segment)
+    - new_latent (e.g., 20 frames from current generation)
+
+    Result: Combined latent with 28 frames total.
+
+    IMPORTANT: Both latents must have matching B, C, H, W dimensions!
+    Only the frame count (F) can differ.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "new_latent": ("LATENT",),
+            },
+            "optional": {
+                "cached_latent": ("LATENT",),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("combined_latent",)
+
+    FUNCTION = "prepend_cache"
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def prepend_cache(self, new_latent, cached_latent=None):
+        """
+        Prepend cached latent frames to new latent.
+
+        If cached_latent is None or empty, returns new_latent unchanged.
+        """
+        # If no cached latent, return new latent as-is
+        if cached_latent is None:
+            logger.info("No cached_latent provided, returning new_latent unchanged")
+            return (new_latent,)
+
+        # Validate new_latent
+        if not isinstance(new_latent, dict) or "samples" not in new_latent:
+            raise ValueError("new_latent must be a dict with 'samples' key")
+
+        new_samples = new_latent["samples"]
+        if not isinstance(new_samples, torch.Tensor):
+            raise ValueError("new_latent['samples'] must be a torch.Tensor")
+
+        # Validate cached_latent
+        if not isinstance(cached_latent, dict) or "samples" not in cached_latent:
+            logger.warning(
+                "Invalid cached_latent format, returning new_latent unchanged"
+            )
+            return (new_latent,)
+
+        cached_samples = cached_latent["samples"]
+        if not isinstance(cached_samples, torch.Tensor):
+            logger.warning(
+                "cached_latent['samples'] is not a tensor, returning new_latent unchanged"
+            )
+            return (new_latent,)
+
+        # Check dimensions
+        if new_samples.dim() != 5:
+            raise ValueError(
+                f"new_latent must be 5D [B,C,F,H,W], got shape {list(new_samples.shape)}"
+            )
+
+        if cached_samples.dim() != 5:
+            raise ValueError(
+                f"cached_latent must be 5D [B,C,F,H,W], got shape {list(cached_samples.shape)}"
+            )
+
+        # Check compatible dimensions
+        new_shape = new_samples.shape
+        cached_shape = cached_samples.shape
+
+        if (
+            new_shape[0] != cached_shape[0]  # Batch
+            or new_shape[1] != cached_shape[1]  # Channels
+            or new_shape[3] != cached_shape[3]  # Height
+            or new_shape[4] != cached_shape[4]
+        ):  # Width
+            raise ValueError(
+                f"Incompatible latent dimensions!\n"
+                f"new_latent:    {list(new_shape)} [B,C,F,H,W]\n"
+                f"cached_latent: {list(cached_shape)} [B,C,F,H,W]\n"
+                f"B, C, H, W must match! Only F (frames) can differ."
+            )
+
+        # Concatenate along frame dimension (dim=2)
+        try:
+            combined_samples = torch.cat([cached_samples, new_samples], dim=2)
+
+            logger.info(
+                f"Prepended cached latent: "
+                f"cached={list(cached_shape)} + new={list(new_shape)} "
+                f"→ combined={list(combined_samples.shape)}"
+            )
+
+            # Return combined latent in standard format
+            return ({"samples": combined_samples},)
+
+        except Exception as e:
+            logger.error(
+                f"Failed to concatenate latents: {e}\n"
+                f"new_shape={list(new_shape)}, cached_shape={list(cached_shape)}",
+                exc_info=True,
+            )
+            raise

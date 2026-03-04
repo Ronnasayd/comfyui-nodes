@@ -1,6 +1,7 @@
 from .aspect_ratio_crop import AspectRatioCrop
 from .pixelated_border_node import PixelatedBorderNode
 from .video_segment_extender import (
+    LatentPrependCache,
     LatentShapeDebug,
     VideoSegmentPrepare,
     VideoSegmentSave,
@@ -14,7 +15,7 @@ NODE_CLASS_MAPPINGS = {
     "VideoSegmentPrepare": VideoSegmentPrepare,
     "VideoSegmentSave": VideoSegmentSave,
     "LatentShapeDebug": LatentShapeDebug,
-    # Mantido para compatibilidade com workflows antigos
+    "LatentPrependCache": LatentPrependCache,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -24,4 +25,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoSegmentPrepare": "Video Segment Prepare",
     "VideoSegmentSave": "Video Segment Save",
     "LatentShapeDebug": "Latent Shape Debug",
+    "LatentPrependCache": "Latent Prepend Cache",
 }

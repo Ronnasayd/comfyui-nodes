@@ -109,6 +109,28 @@ Final Concatenation:
 
 ## Usage Guide
 
+### Recommended Workflow (Simple & Reliable)
+
+```python
+# Use image-based temporal conditioning (blended frames)
+VideoSegmentPrepare(
+    project_name="my_video",
+    total_seconds=6,
+    segment_seconds=2,
+    fps=16.0,
+    overlap_frames=0  # RECOMMENDED: Disable latent caching
+)
+↓
+# Generate video using the blended frame as conditioning
+↓
+VideoSegmentSave(
+    overlap_frames=0,  # Must match VideoSegmentPrepare
+    crossfade_frames=0  # Optional: 2-4 for smooth transitions
+)
+```
+
+**Result**: Smooth temporal transitions using blended frame conditioning, no complex latent handling required.
+
 ### Basic Workflow (No Temporal Consistency)
 
 ```python
@@ -127,7 +149,9 @@ VideoSegmentSave(
 
 Result: Standard concatenation, no temporal continuity
 
-### Recommended Workflow (With Temporal Consistency)
+### Advanced Workflow (Latent-Level Temporal Consistency - NOT RECOMMENDED)
+
+⚠️ **WARNING**: This approach often causes "tensor size mismatch" errors. Use the Recommended Workflow above instead.
 
 ```python
 # Enable latent caching for smooth transitions
@@ -136,6 +160,8 @@ VideoSegmentPrepare(
     total_seconds=6,
     segment_seconds=2,
     fps=16.0,
+    overlap_frames=8  # Cache last 8 frames
+)
     overlap_frames=8  # Cache last 8 frames
 )
 ↓
@@ -234,6 +260,21 @@ ComfyUI/output/
 - Crossfade requires re-encoding (slower, ~5-10 seconds for 3 segments)
 
 ## Troubleshooting
+
+### ERROR: "Sizes of tensors must match except in dimension X"
+
+**Cause**: You are trying to concatenate the `cached_latent` with other latents using standard ComfyUI batch/concatenate nodes. The cached latent has different dimensions (e.g., width=8, height=51) than your newly generated latent.
+
+**Solution**: Set `overlap_frames=0` in BOTH `VideoSegmentPrepare` AND `VideoSegmentSave` nodes. This disables latent caching entirely and uses only image-based conditioning (the blended frame) for temporal smoothness.
+
+```
+VideoSegmentPrepare: overlap_frames=0
+VideoSegmentSave: overlap_frames=0
+```
+
+The blended frame extraction provides sufficient temporal smoothness for most video generation workflows without the complexity of latent concatenation.
+
+**Advanced Note**: If you specifically need latent-level temporal consistency, you'll need to use model-specific conditioning nodes rather than generic concatenation. This is an advanced use case - for 95% of users, overlap_frames=0 is the recommended setting.
 
 ### Warning: "No cached latent found for segment N"
 
