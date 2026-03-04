@@ -1,3 +1,5 @@
+import json
+import logging
 import math
 import os
 import shutil
@@ -8,6 +10,8 @@ import folder_paths
 import numpy as np
 import torch
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # Helpers compartilhados
@@ -516,11 +520,18 @@ class VideoSegmentPrepare:
             "optional": {
                 "initial_image": ("IMAGE",),
                 "initial_video": ("VIDEO",),
+                "cache_window_size": ("INT", {"default": 4, "min": 1, "max": 20}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING")
-    RETURN_NAMES = ("next_image", "current_segment", "finished", "final_video_path")
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING", "LATENT")
+    RETURN_NAMES = (
+        "next_image",
+        "current_segment",
+        "finished",
+        "final_video_path",
+        "cached_latent",
+    )
 
     FUNCTION = "prepare"
     CATEGORY = "MYNodes/VideoSegment"
@@ -541,10 +552,51 @@ class VideoSegmentPrepare:
         remove_duplicate_frames,
         initial_image=None,
         initial_video=None,
+        cache_window_size=4,
     ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
         current_segment = _count_segments(project_path)
+
+        # Create latent cache directory
+        cache_dir = os.path.join(project_path, "latent_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # Save cache_window_size to project state for VideoSegmentSave
+        state_file = os.path.join(project_path, "project_state.json")
+        if os.path.exists(state_file):
+            with open(state_file, "r") as f:
+                state = json.load(f)
+        else:
+            state = {}
+
+        state["cache_window_size"] = cache_window_size
+        with open(state_file, "w") as f:
+            json.dump(state, f, indent=2)
+
+        # Load cached latent from previous segment if available
+        cached_latent = None
+        if current_segment > 0:
+            cache_path = os.path.join(
+                cache_dir, f"segment_{current_segment - 1:03d}.pt"
+            )
+            if os.path.exists(cache_path):
+                try:
+                    cached_latent = torch.load(
+                        cache_path, map_location="cpu", weights_only=False
+                    )
+                    logger.info(
+                        f"Loaded cached latent from segment {current_segment - 1}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to load cached latent from {cache_path}: {e}"
+                    )
+                    cached_latent = None
+            else:
+                logger.debug(
+                    f"No cached latent found for segment {current_segment - 1}"
+                )
 
         # Determinar a imagem inicial a ser usada
         start_image = None
@@ -575,11 +627,17 @@ class VideoSegmentPrepare:
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
             final_path = final_video if os.path.exists(final_video) else ""
-            return (start_image, int(current_segment), True, str(final_path))
+            return (
+                start_image,
+                int(current_segment),
+                True,
+                str(final_path),
+                cached_latent,
+            )
 
         # Primeiro segmento → usa imagem inicial (de video ou image)
         if current_segment == 0:
-            return (start_image, 0, False, "")
+            return (start_image, 0, False, "", cached_latent)
 
         # Segmentos seguintes → extrai frame(s) suavizado(s) do segmento anterior
         last_segment_path = os.path.join(
@@ -594,7 +652,7 @@ class VideoSegmentPrepare:
         else:
             frame = _extract_last_frame(last_segment_path, project_path)
 
-        return (frame, int(current_segment), False, "")
+        return (frame, int(current_segment), False, "", cached_latent)
 
 
 # ============================================================
@@ -660,6 +718,9 @@ class VideoSegmentSave:
                     {"default": 1, "min": 0, "max": 10, "step": 1},
                 ),
             },
+            "optional": {
+                "latent": ("LATENT",),
+            },
         }
 
     RETURN_TYPES = ("INT", "BOOLEAN", "STRING")
@@ -678,6 +739,7 @@ class VideoSegmentSave:
         fps,
         frame_offset_percent,
         remove_duplicate_frames,
+        latent=None,
     ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
@@ -686,6 +748,45 @@ class VideoSegmentSave:
         # Salva o novo segmento
         seg_path = os.path.join(project_path, f"segment_{current_segment:03d}.mp4")
         _save_video_tensor(video, seg_path, fps)
+
+        # Save latent cache for temporal continuity
+        if latent is not None:
+            cache_dir = os.path.join(project_path, "latent_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            cache_path = os.path.join(cache_dir, f"segment_{current_segment:03d}.pt")
+
+            try:
+                torch.save(latent, cache_path)
+                logger.info(f"Saved latent cache for segment {current_segment}")
+            except Exception as e:
+                logger.warning(f"Failed to save latent cache to {cache_path}: {e}")
+
+            # Cleanup old cache files beyond the window size
+            state_file = os.path.join(project_path, "project_state.json")
+            cache_window_size = 4  # default
+            if os.path.exists(state_file):
+                try:
+                    with open(state_file, "r") as f:
+                        state = json.load(f)
+                    cache_window_size = state.get("cache_window_size", 4)
+                except Exception as e:
+                    logger.warning(f"Failed to read cache_window_size from state: {e}")
+
+            old_index = current_segment - cache_window_size
+            if old_index >= 0:
+                old_cache_path = os.path.join(cache_dir, f"segment_{old_index:03d}.pt")
+                if os.path.exists(old_cache_path):
+                    try:
+                        os.remove(old_cache_path)
+                        logger.debug(
+                            f"Removed old latent cache for segment {old_index}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to remove old cache {old_cache_path}: {e}"
+                        )
+
         current_segment += 1
 
         del video
