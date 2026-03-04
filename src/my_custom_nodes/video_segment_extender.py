@@ -1244,6 +1244,98 @@ class LatentShapeDebug:
         return (info, latent)
 
 
+class ConditioningShapeDebug:
+    """
+    Debug conditioning structure and tensor properties.
+
+    Similar to LatentShapeDebug, this node inspects CONDITIONING inputs
+    and returns formatted information about their structure, dimensions,
+    and metadata.
+
+    Input:
+        - conditioning: CONDITIONING data (typically a list of tuples)
+
+    Output:
+        - shape_info: String containing detailed conditioning structure info
+        - conditioning: The input conditioning (passthrough for chaining)
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"conditioning": ("CONDITIONING",)}}
+
+    RETURN_TYPES = ("STRING", "CONDITIONING")
+    RETURN_NAMES = ("shape_info", "conditioning")
+
+    FUNCTION = "debug_shape"
+    OUTPUT_NODE = True
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def debug_shape(self, conditioning):
+        if conditioning is None:
+            info = "Conditioning is None"
+            logger.info(info)
+            return (info, conditioning)
+
+        if not isinstance(conditioning, list):
+            info = f"Unexpected conditioning type: {type(conditioning)} (expected list)"
+            logger.warning(info)
+            return (info, conditioning)
+
+        if len(conditioning) == 0:
+            info = "Conditioning list is empty"
+            logger.warning(info)
+            return (info, conditioning)
+
+        # Analyze first conditioning element (typical structure)
+        first_cond = conditioning[0]
+
+        if not isinstance(first_cond, (tuple, list)) or len(first_cond) < 2:
+            info = f"Unexpected conditioning element structure: {type(first_cond)}"
+            logger.warning(info)
+            return (info, conditioning)
+
+        cond_tensor = first_cond[0]
+        cond_metadata = first_cond[1] if len(first_cond) > 1 else {}
+
+        # Build info string
+        info_parts = [f"Conditioning list length: {len(conditioning)}"]
+
+        if isinstance(cond_tensor, torch.Tensor):
+            shape = tuple(cond_tensor.shape)
+            dims = cond_tensor.dim()
+            total_elements = cond_tensor.numel()
+            mem_mb = total_elements * cond_tensor.element_size() / (1024**2)
+            device = str(cond_tensor.device)
+            dtype = str(cond_tensor.dtype)
+
+            info_parts.append(f"First element tensor shape: {shape}")
+            info_parts.append(f"Dimensions: {dims}")
+            info_parts.append(f"DType: {dtype}")
+            info_parts.append(f"Device: {device}")
+            info_parts.append(f"Total elements: {total_elements:,}")
+            info_parts.append(f"Memory: {mem_mb:.2f} MB")
+        else:
+            info_parts.append(
+                f"First element tensor type: {type(cond_tensor)} (not a torch.Tensor)"
+            )
+
+        if isinstance(cond_metadata, dict):
+            info_parts.append(f"Metadata keys: {list(cond_metadata.keys())}")
+            for key, value in cond_metadata.items():
+                if isinstance(value, torch.Tensor):
+                    info_parts.append(f"  {key}: Tensor {tuple(value.shape)}")
+                else:
+                    info_parts.append(f"  {key}: {type(value).__name__}")
+        else:
+            info_parts.append(f"Metadata type: {type(cond_metadata)}")
+
+        info = "\n".join(info_parts)
+        logger.info(info.replace("\n", " | "))
+
+        return (info, conditioning)
+
+
 class LatentPrependCache:
     """
     Prepend cached latent frames to a new latent for temporal consistency.
