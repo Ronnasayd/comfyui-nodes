@@ -1,0 +1,122 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": "1",
+        "title": "Implement Temporal Consistency via Latent Caching and Overlap Handling in Video Segment Extender",
+        "description": "Introduce disk-backed latent frame caching, cache-based latent prepending, and overlap-aware video segment concatenation to achieve temporal continuity in long-form video generation using video_segment_extender.py.",
+        "details": "Begin by adding robust disk-based caching for latent frames at the conclusion of each segment in src/my_custom_nodes/video_segment_extender.py. Create helper functions: _save_latent_cache to store the last N frames of the segment latent as a .pt file with metadata, _load_latent_cache to safely retrieve cached latents in the expected dict format, and _cleanup_old_caches to prune obsolete cache files, keeping only the most recent. Update VideoSegmentSave.save() to invoke latent caching after successful segment save, respecting the overlap_frames parameter, and handle all error/edge cases gracefully. Next, modify VideoSegmentPrepare.prepare() so that, for segments beyond the first, it loads the cached latent from the previous segment, prepends it to the generation process, and returns it in cached_latent. Ensure fallback logic for missing/invalid caches, shape mismatches, and diverse tensor representations (VideoInput objects, raw torch tensors).\n\nImplement _concat_videos_with_overlap to trim overlap_frames from the start of each segment (except the first) before performing ffmpeg concatenation, ensuring seamless temporal transitions. Handle simultaneous crossfade and overlap scenarios by trimming before crossfade operations and adjusting offset calculations accordingly. Use comprehensive logging throughout for cache operations, error handling, and debugging. Guarantee full backward compatibility by allowing features to be disabled (overlap_frames=0), and support multiple video models and latent formats. Adopt Google Python style, add type hints, docstrings, and place all new code in designated sections of video_segment_extender.py and tests in tests/test_my_custom_nodes.py. Create/readme documentation in docs/features/04-03-2026-video-segment-temporal-consistency/README.md detailing usage, workflow diagrams, parameters, troubleshooting, and code review checklist.\n\nReference successful patterns from official ComfyUI custom node guides, PyTorch documentation, ffmpeg concat/trimming, and similar open-source projects like ComfyUI-VideoHelperSuite and AnimateDiff. Ensure edge cases (None latents, insufficient frames, variable shapes, concurrent runs) and cross-platform compatibility are robustly addressed.",
+        "testStrategy": "1. Add unit tests in tests/test_my_custom_nodes.py: (a) Verify latent cache save/load roundtrip for 5D and 4D tensors, (b) Test extraction of last N frames with overlap, (c) Handle None latent and insufficient frames scenarios, (d) Assert that VideoSegmentPrepare.prepare loads and applies cached latents, (e) Confirm VideoSegmentSave.save creates/updates latent caches and that _cleanup_old_caches works as intended. 2. Build integration tests simulating multi-segment workflows including latent prepending and final concatenation with overlap trimming; verify video durations and latents are correct. 3. Use pytest to automate CI/CD tests via .github/workflows. 4. Manual validation using ComfyUI with various segment counts, overlap/crossfade parameter combinations, different video models, and interruption/resume cases. 5. Create detailed documentation and check Google Python style, type hints, error coverage (>90%), logging, memory/disk use, and backward compatibility.",
+        "status": "in-progress",
+        "dependencies": [],
+        "priority": "medium",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Design and Implement Latent Cache Helper Functions",
+            "description": "Develop disk-based latent frame cache helpers: _save_latent_cache to store last N latent frames with metadata as a .pt file, _load_latent_cache to retrieve cached latents in dict format, and _cleanup_old_caches to prune obsolete caches while keeping only recent files. Handle edge cases such as None latents, shape/dimension mismatches, and insufficient frames. Place all helpers in src/my_custom_nodes/video_segment_extender.py.",
+            "dependencies": [],
+            "details": "Ensure these functions support both 5D video and 4D image latents, maintain metadata for shape and type, and perform thorough error checking. Follow Google Python style and add type hints and docstrings.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 2,
+            "title": "Update VideoSegmentSave.save() to Invoke Latent Cache Creation",
+            "description": "Enhance VideoSegmentSave.save() to invoke _save_latent_cache immediately after successful segment save, storing the last overlap_frames worth of latents if overlap_frames > 0. Ensure the cache is not created when features are disabled or the input latent is None.",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Integrate logging for status and error handling, support multiple video models and latent formats, and maintain backward compatibility by no-op if overlap_frames=0. Docstring must reflect new cache logic.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 3,
+            "title": "Modify VideoSegmentPrepare.prepare() to Load and Prepend Cached Latents",
+            "description": "Refactor VideoSegmentPrepare.prepare() so non-first segments attempt to load cached latent from preceding segment using _load_latent_cache; prepend loaded latent frames to the generation pipeline and return cached_latent in output. Implement graceful fallback if cache is missing or invalid.",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Handle diverse latent tensor representations, fallback logic for errors, and ensure proper return values in line with updated workflow. Update docstrings and add comprehensive logging surrounding cache operations.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 4,
+            "title": "Implement Overlap-Aware Video Segment Concatenation with FFmpeg",
+            "description": "Create _concat_videos_with_overlap to trim overlap_frames from the start of each segment (except the first) using ffmpeg, then concatenate segments seamlessly. Account for simultaneous crossfade and overlap scenarios by trimming before crossfade and adjusting offsets.",
+            "dependencies": [],
+            "details": "Integrate new concat logic into VideoSegmentSave.save(), allow toggling between legacy and overlap-aware modes, and ensure video durations and transitions are correct post-trimming.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 5,
+            "title": "Implement Robust Error Handling and Cache Fallback Logic",
+            "description": "Augment all cache and concatenation routines to robustly handle edge cases: missing/invalid cache, None latents, insufficient frames, latent shape incompatibility (e.g., segment resolution changes), concurrent runs. Implement logging to inform users of warnings and errors.",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Apply comprehensive input validation, optimize memory management (CPU transfer, torch.cuda.empty_cache), and employ file locking or timestamp-based cache naming for safety across parallel executions.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 6,
+            "title": "Add Comprehensive Logging and Backward Compatibility Toggles",
+            "description": "Integrate detailed logging for cache, error states, and workflow steps across all updated functions. Add toggles and safeguards to maintain full backward compatibility, allowing latent caching and overlap-aware features to be disabled gracefully.",
+            "dependencies": [],
+            "details": "Utilize consistent log format, document configuration toggles, and verify behavior when overlap_frames=0 or when caches are absent.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          },
+          {
+            "id": 7,
+            "title": "Write Unit and Integration Tests for All New Features",
+            "description": "Develop unit and integration tests in tests/test_my_custom_nodes.py to validate cache save/load roundtrip, overlap extraction, fallback and error handling, node behavior with/without caches, and correct trimming during concatenation. Achieve high coverage for all critical paths.",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Implement distinct tests for 5D and 4D latents, missing or corrupted caches, workflow simulation of multi-segment video generation, and integration checks for duration after final concatenation. Mark critical pass/fail criteria.",
+            "status": "done",
+            "testStrategy": "",
+            "updatedAt": "2026-03-04T21:11:10.536Z",
+            "parentId": "undefined"
+          },
+          {
+            "id": 8,
+            "title": "Create Thorough Documentation Covering Usage, Diagrams, Troubleshooting, and Review Checklist",
+            "description": "Document feature usage, workflow diagrams, parameter explanations, troubleshooting steps, and code review checklist in docs/features/04-03-2026-video-segment-temporal-consistency/README.md. Ensure guidance references new functions, configuration toggles, and test coverage requirements.",
+            "dependencies": [
+              "1.1"
+            ],
+            "details": "Include examples, visual workflow diagrams, backward compatibility notes, explanation of error messages, test instructions, and links to official guides and related projects. Review for clarity and completeness.",
+            "status": "pending",
+            "testStrategy": "",
+            "parentId": "undefined"
+          }
+        ],
+        "complexity": 9,
+        "recommendedSubtasks": 8,
+        "expansionPrompt": "Break down this task into subtasks for: (1) designing and implementing disk-based latent frame caching helpers, (2) updating segment save logic to invoke latent cache creation, (3) modifying segment preparation to load and prepend cached latents, (4) implementing robust error handling and cache fallback logic, (5) developing overlap-aware video segment concatenation including ffmpeg integration and crossfade/overlap interplay, (6) comprehensive logging and backward compatibility toggles, (7) writing unit and integration tests in designated test suites for all scenarios, and (8) creating thorough documentation covering usage, troubleshooting, workflow diagrams, and code review checklist.",
+        "updatedAt": "2026-03-04T21:11:10.536Z"
+      }
+    ],
+    "metadata": {
+      "version": "1.0.0",
+      "lastModified": "2026-03-04T21:11:10.537Z",
+      "taskCount": 1,
+      "completedCount": 0,
+      "tags": [
+        "master"
+      ]
+    }
+  }
+}

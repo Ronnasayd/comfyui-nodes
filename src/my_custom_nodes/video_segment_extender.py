@@ -104,6 +104,241 @@ def _count_segments(project_path: str) -> int:
     return len(_list_segments(project_path))
 
 
+# ============================================================
+# Latent Caching Infrastructure
+# ============================================================
+
+
+def _save_latent_cache(
+    latent_dict: dict,
+    project_path: str,
+    segment_index: int,
+    overlap_frames: int,
+) -> bool:
+    """
+    Save the last N frames of a latent tensor to disk for temporal consistency.
+
+    Args:
+        latent_dict: Latent dictionary with 'samples' key containing torch.Tensor
+        project_path: Project directory path
+        segment_index: Current segment index for naming the cache file
+        overlap_frames: Number of overlapping frames to extract and cache
+
+    Returns:
+        True if cache was successfully saved, False otherwise
+
+    The cache file will be saved as:
+        {project_path}/latent_cache_seg_{index:03d}.pt
+
+    For 5D video latents [B, C, F, H, W], extracts the last 'overlap_frames' frames.
+    For 4D image latents [B, C, H, W], the function logs a warning and returns False.
+    """
+    # Validate inputs
+    if latent_dict is None:
+        logger.debug(
+            f"Skipping latent cache save for segment {segment_index}: latent is None"
+        )
+        return False
+
+    if overlap_frames <= 0:
+        logger.debug(
+            f"Skipping latent cache save for segment {segment_index}: "
+            f"overlap_frames={overlap_frames}"
+        )
+        return False
+
+    if not isinstance(latent_dict, dict):
+        logger.warning(
+            f"Cannot save latent cache for segment {segment_index}: "
+            f"latent is not a dict (type={type(latent_dict)})"
+        )
+        return False
+
+    samples = latent_dict.get("samples")
+    if samples is None:
+        logger.warning(
+            f"Cannot save latent cache for segment {segment_index}: "
+            f"no 'samples' key in latent dict"
+        )
+        return False
+
+    if not isinstance(samples, torch.Tensor):
+        logger.warning(
+            f"Cannot save latent cache for segment {segment_index}: "
+            f"'samples' is not a tensor (type={type(samples)})"
+        )
+        return False
+
+    # Extract overlap frames based on tensor dimensionality
+    shape = samples.shape
+    dims = len(shape)
+
+    if dims == 5:
+        # Video latent: [B, C, F, H, W]
+        _, _, f, _, _ = shape
+        actual_overlap = min(overlap_frames, f)
+
+        if actual_overlap < overlap_frames:
+            logger.warning(
+                f"Requested overlap_frames={overlap_frames} but segment only has "
+                f"{f} frames. Caching all {actual_overlap} available frames."
+            )
+
+        # Extract last N frames
+        overlap_latent = samples[:, :, -actual_overlap:, :, :].detach().cpu()
+
+        logger.info(
+            f"Extracting {actual_overlap} overlap frames from video latent "
+            f"for segment {segment_index} (shape: {list(overlap_latent.shape)})"
+        )
+
+    elif dims == 4:
+        # Image latent: [B, C, H, W] - no temporal dimension
+        logger.warning(
+            f"Cannot cache overlap frames for segment {segment_index}: "
+            f"latent is 4D image format (shape={list(shape)}), no temporal dimension"
+        )
+        return False
+
+    else:
+        logger.warning(
+            f"Cannot cache overlap frames for segment {segment_index}: "
+            f"unexpected tensor dimensions={dims} (shape={list(shape)})"
+        )
+        return False
+
+    # Prepare cache data with metadata
+    cache_data = {
+        "samples": overlap_latent,
+        "metadata": {
+            "segment_index": segment_index,
+            "overlap_frames": actual_overlap,
+            "original_shape": list(shape),
+            "cached_shape": list(overlap_latent.shape),
+            "dtype": str(overlap_latent.dtype),
+            "device": str(overlap_latent.device),
+        },
+    }
+
+    # Save to disk
+    cache_path = os.path.join(project_path, f"latent_cache_seg_{segment_index:03d}.pt")
+
+    try:
+        torch.save(cache_data, cache_path)
+        mem_mb = overlap_latent.numel() * overlap_latent.element_size() / (1024**2)
+        logger.info(
+            f"Successfully saved latent cache for segment {segment_index} "
+            f"({mem_mb:.2f} MB) to {cache_path}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(
+            f"Failed to save latent cache for segment {segment_index}: {e}",
+            exc_info=True,
+        )
+        return False
+
+
+def _load_latent_cache(project_path: str, segment_index: int) -> dict | None:
+    """
+    Load cached latent frames from disk.
+
+    Args:
+        project_path: Project directory path
+        segment_index: Segment index to load cache from
+
+    Returns:
+        Latent dict with 'samples' key containing cached frames, or None if not found
+
+    The cache is expected at:
+        {project_path}/latent_cache_seg_{index:03d}.pt
+    """
+    cache_path = os.path.join(project_path, f"latent_cache_seg_{segment_index:03d}.pt")
+
+    if not os.path.exists(cache_path):
+        logger.debug(
+            f"No latent cache found for segment {segment_index} at {cache_path}"
+        )
+        return None
+
+    try:
+        cache_data = torch.load(cache_path, map_location="cpu")
+
+        if not isinstance(cache_data, dict):
+            logger.warning(
+                f"Invalid latent cache for segment {segment_index}: "
+                f"expected dict, got {type(cache_data)}"
+            )
+            return None
+
+        samples = cache_data.get("samples")
+        if samples is None or not isinstance(samples, torch.Tensor):
+            logger.warning(
+                f"Invalid latent cache for segment {segment_index}: "
+                f"missing or invalid 'samples' tensor"
+            )
+            return None
+
+        metadata = cache_data.get("metadata", {})
+        logger.info(
+            f"Loaded latent cache for segment {segment_index}: "
+            f"shape={list(samples.shape)}, "
+            f"overlap_frames={metadata.get('overlap_frames', 'unknown')}"
+        )
+
+        # Return in standard latent dict format
+        return {"samples": samples}
+
+    except Exception as e:
+        logger.error(
+            f"Failed to load latent cache for segment {segment_index}: {e}",
+            exc_info=True,
+        )
+        return None
+
+
+def _cleanup_old_caches(project_path: str, keep_last_n: int = 2) -> None:
+    """
+    Remove old latent cache files, keeping only the most recent N.
+
+    Args:
+        project_path: Project directory path
+        keep_last_n: Number of most recent cache files to keep (default: 2)
+
+    This helps manage disk space by removing obsolete caches that are no longer needed.
+    """
+    try:
+        # Find all cache files
+        cache_files = [
+            f
+            for f in os.listdir(project_path)
+            if f.startswith("latent_cache_seg_") and f.endswith(".pt")
+        ]
+
+        if len(cache_files) <= keep_last_n:
+            return
+
+        # Sort by segment index (filename format: latent_cache_seg_NNN.pt)
+        cache_files.sort()
+
+        # Remove oldest caches
+        files_to_remove = cache_files[:-keep_last_n]
+        for cache_file in files_to_remove:
+            cache_path = os.path.join(project_path, cache_file)
+            os.remove(cache_path)
+            logger.debug(f"Removed old latent cache: {cache_file}")
+
+        if files_to_remove:
+            logger.info(
+                f"Cleaned up {len(files_to_remove)} old latent cache(s), "
+                f"kept last {keep_last_n}"
+            )
+
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old latent caches: {e}", exc_info=True)
+
+
 def _extract_last_frame(video_path: str, project_path: str) -> torch.Tensor:
     temp_frame = os.path.join(project_path, "last_frame.png")
 
@@ -321,6 +556,175 @@ def _crossfade_videos(video_files, output_path, crossfade_frames, fps):
     _run_subprocess(cmd, "Crossfade failed")
 
 
+def _concat_videos_with_overlap(
+    video_files: List[str],
+    output_path: str,
+    overlap_frames: int,
+    fps: float,
+):
+    """
+    Concatenate video segments with overlap trimming for temporal consistency.
+
+    When latent frames are prepended to segments (except the first), the generated
+    videos will have overlap_frames extra frames at the beginning. This function
+    trims those overlapping frames before concatenation to avoid temporal duplication.
+
+    Args:
+        video_files: List of video file paths to concatenate
+        output_path: Path for the final concatenated video
+        overlap_frames: Number of frames to trim from the start of each segment (except first)
+        fps: Frames per second of the videos
+
+    Process:
+        1. First segment: keep as-is
+        2. Subsequent segments: skip first (overlap_frames / fps) seconds using ffmpeg -ss
+        3. Concatenate all trimmed segments seamlessly
+    """
+    _validate_positive(fps, "fps")
+
+    if overlap_frames <= 0:
+        logger.warning(
+            "overlap_frames <= 0 in _concat_videos_with_overlap, "
+            "falling back to standard concatenation"
+        )
+        _concat_videos(video_files, output_path)
+        return
+
+    if len(video_files) < 2:
+        # Single video: no overlap to trim
+        shutil.copy2(video_files[0], output_path)
+        logger.info(f"Single segment: copied to {output_path}")
+        return
+
+    # Calculate trim duration in seconds
+    trim_duration = overlap_frames / fps
+    logger.info(
+        f"Concatenating {len(video_files)} segments with {overlap_frames} "
+        f"overlap frames ({trim_duration:.3f}s trim per segment)"
+    )
+
+    # Create temporary directory for trimmed segments
+    with tempfile.TemporaryDirectory() as temp_dir:
+        trimmed_files = []
+
+        # Process each segment
+        for i, video_file in enumerate(video_files):
+            if i == 0:
+                # First segment: no trimming needed
+                trimmed_files.append(video_file)
+                logger.debug(f"Segment {i}: keeping original (no trim)")
+            else:
+                # Subsequent segments: trim first overlap_frames
+                trimmed_path = os.path.join(temp_dir, f"trimmed_{i:03d}.mp4")
+
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(trim_duration),  # Skip first N seconds
+                    "-i",
+                    video_file,
+                    "-c",
+                    "copy",  # Stream copy for speed
+                    trimmed_path,
+                ]
+
+                try:
+                    _run_subprocess(cmd, f"Failed to trim segment {i}")
+                    trimmed_files.append(trimmed_path)
+                    logger.debug(
+                        f"Segment {i}: trimmed {trim_duration:.3f}s from start"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to trim segment {i}, using original: {e}",
+                        exc_info=True,
+                    )
+                    trimmed_files.append(video_file)  # Fallback to original
+
+        # Concatenate trimmed segments using standard concat
+        _concat_videos(trimmed_files, output_path)
+        logger.info(
+            f"Successfully concatenated {len(trimmed_files)} segments with overlap handling"
+        )
+
+
+def _concat_videos_with_overlap_and_crossfade(
+    video_files: List[str],
+    output_path: str,
+    overlap_frames: int,
+    crossfade_frames: int,
+    fps: float,
+):
+    """
+    Concatenate video segments with both overlap trimming AND crossfade transitions.
+
+    This handles the complex case where:
+    1. Videos have overlapping latent frames that need trimming
+    2. Crossfade transitions are desired between segments
+
+    The processing order is:
+    1. Trim overlap_frames from each segment (except first)
+    2. Apply crossfade transitions between trimmed segments
+
+    Args:
+        video_files: List of video file paths to concatenate
+        output_path: Path for the final concatenated video
+        overlap_frames: Number of frames to trim from start of each segment (except first)
+        crossfade_frames: Number of frames for crossfade transition effect
+        fps: Frames per second of the videos
+    """
+    _validate_positive(fps, "fps")
+
+    if overlap_frames <= 0 or len(video_files) < 2:
+        # No overlap handling needed, just apply crossfade
+        _crossfade_videos(video_files, output_path, crossfade_frames, fps)
+        return
+
+    # Calculate trim duration
+    trim_duration = overlap_frames / fps
+    logger.info(
+        f"Concatenating with overlap trim ({trim_duration:.3f}s) "
+        f"and crossfade ({crossfade_frames} frames)"
+    )
+
+    # Create temporary directory for trimmed segments
+    with tempfile.TemporaryDirectory() as temp_dir:
+        trimmed_files = []
+
+        # Trim overlap from all segments except first
+        for i, video_file in enumerate(video_files):
+            if i == 0:
+                trimmed_files.append(video_file)
+            else:
+                trimmed_path = os.path.join(temp_dir, f"trimmed_{i:03d}.mp4")
+
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(trim_duration),
+                    "-i",
+                    video_file,
+                    "-c:v",
+                    "libx264",  # Re-encode (required for xfade filter)
+                    "-pix_fmt",
+                    "yuv420p",
+                    trimmed_path,
+                ]
+
+                try:
+                    _run_subprocess(cmd, f"Failed to trim segment {i}")
+                    trimmed_files.append(trimmed_path)
+                except Exception as e:
+                    logger.error(f"Failed to trim segment {i}: {e}", exc_info=True)
+                    trimmed_files.append(video_file)
+
+        # Apply crossfade to trimmed segments
+        _crossfade_videos(trimmed_files, output_path, crossfade_frames, fps)
+        logger.info("Successfully concatenated with overlap trim and crossfade")
+
+
 # ============================================================
 # Nodes
 # ============================================================
@@ -378,7 +782,21 @@ class VideoSegmentPrepare:
         cache_window_size=4,
         overlap_frames=8,
     ):
+        """
+        Prepare the next video segment by determining the starting frame and cached latent.
 
+        This method:
+        1. Determines the current segment index
+        2. For segment 0: returns initial_image (if provided) with no cached latent
+        3. For segments 1+:
+           - Extracts a blended frame from the previous segment as the starting image
+           - Loads cached latent frames from the previous segment for temporal consistency
+           - Returns the cached latent to be prepended to the next generation
+        4. Returns finished=True when all segments are complete
+
+        Returns:
+            (next_image, current_segment, finished, final_video_path, cached_latent)
+        """
         _validate_positive(segment_seconds, "segment_seconds")
         _validate_positive(total_seconds, "total_seconds")
 
@@ -386,6 +804,7 @@ class VideoSegmentPrepare:
         max_segments = math.ceil(total_seconds / segment_seconds)
         current_segment = _count_segments(project_path)
 
+        # Check if generation is complete
         if current_segment >= max_segments:
             final_path = os.path.join(project_path, "final_video.mp4")
             return (
@@ -396,22 +815,49 @@ class VideoSegmentPrepare:
                 latent,
             )
 
+        # First segment: use initial_image, no cached latent
         if current_segment == 0:
             if initial_image is not None:
-                return (initial_image, 0, False, "", latent)
+                logger.info("Segment 0: Using initial_image, no cached latent")
+                return (initial_image, 0, False, "", None)
 
+        # Subsequent segments: extract blended frame and load cached latent
+        cached_latent = None
         last_segment = None
+
         if current_segment > 0:
             segments = _list_segments(project_path)
             last_segment = os.path.join(project_path, segments[-1])
 
+            # Load cached latent from previous segment
+            if overlap_frames > 0:
+                prev_seg_index = current_segment - 1
+                cached_latent = _load_latent_cache(project_path, prev_seg_index)
+
+                if cached_latent is not None:
+                    logger.info(
+                        f"Segment {current_segment}: Loaded cached latent from "
+                        f"segment {prev_seg_index}"
+                    )
+                else:
+                    logger.warning(
+                        f"Segment {current_segment}: No cached latent found for "
+                        f"segment {prev_seg_index}, proceeding without temporal continuity"
+                    )
+
+        # Extract blended frame from previous segment
         if last_segment:
             frame = _extract_blended_frame(
                 last_segment, project_path, frame_blend_count, frame_offset_percent
             )
-            return (frame, current_segment, False, "", latent)
+            logger.info(
+                f"Segment {current_segment}: Extracted blended frame from {last_segment}"
+            )
+            return (frame, current_segment, False, "", cached_latent)
 
-        return (torch.zeros((1, 512, 512, 3)), 0, False, "", latent)
+        # Fallback (should rarely happen)
+        logger.warning(f"Segment {current_segment}: Using fallback zero tensor")
+        return (torch.zeros((1, 512, 512, 3)), 0, False, "", cached_latent)
 
 
 class VideoSegmentSave:
@@ -455,7 +901,15 @@ class VideoSegmentSave:
         overlap_frames=8,
         crossfade_frames=0,
     ):
+        """
+        Save video segment and cache latent frames for temporal consistency.
 
+        This method:
+        1. Saves the generated video segment to disk
+        2. Caches the last N frames of the latent (if provided) for the next segment
+        3. Performs final concatenation when all segments are complete
+        4. Cleans up old latent caches to manage disk space
+        """
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
         segments = _list_segments(project_path)
@@ -466,21 +920,59 @@ class VideoSegmentSave:
         if os.path.exists(seg_path):
             raise RuntimeError("Segment overwrite prevented")
 
+        # Save video segment
         _save_video_tensor(video, seg_path, fps)
+        logger.info(f"Saved video segment {seg_index} to {seg_path}")
+
+        # Cache latent frames for next segment (if overlap_frames > 0)
+        if overlap_frames > 0 and latent is not None:
+            cache_saved = _save_latent_cache(
+                latent, project_path, seg_index, overlap_frames
+            )
+
+            if cache_saved:
+                # Cleanup old caches (keep only last 2)
+                _cleanup_old_caches(project_path, keep_last_n=2)
 
         seg_index += 1
 
+        # Final concatenation when all segments are complete
         if seg_index >= max_segments:
             final_path = os.path.join(project_path, "final_video.mp4")
             video_files = [
                 os.path.join(project_path, f) for f in _list_segments(project_path)
             ]
 
-            if crossfade_frames > 0:
+            # Choose concatenation method based on parameters
+            if overlap_frames > 0 and crossfade_frames > 0:
+                # Both overlap trimming and crossfade
+                logger.info(
+                    f"Final concatenation: overlap trim ({overlap_frames} frames) "
+                    f"+ crossfade ({crossfade_frames} frames)"
+                )
+                _concat_videos_with_overlap_and_crossfade(
+                    video_files, final_path, overlap_frames, crossfade_frames, fps
+                )
+            elif overlap_frames > 0:
+                # Overlap trimming only
+                logger.info(
+                    f"Final concatenation: overlap trim ({overlap_frames} frames)"
+                )
+                _concat_videos_with_overlap(
+                    video_files, final_path, overlap_frames, fps
+                )
+            elif crossfade_frames > 0:
+                # Crossfade only
+                logger.info(
+                    f"Final concatenation: crossfade ({crossfade_frames} frames)"
+                )
                 _crossfade_videos(video_files, final_path, crossfade_frames, fps)
             else:
+                # Standard concatenation (backward compatible)
+                logger.info("Final concatenation: standard (no overlap or crossfade)")
                 _concat_videos(video_files, final_path)
 
+            logger.info(f"Final video created at {final_path}")
             return (seg_index, True, final_path)
 
         return (seg_index, False, "")
