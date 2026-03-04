@@ -1,6 +1,10 @@
 from .aspect_ratio_crop import AspectRatioCrop
 from .pixelated_border_node import PixelatedBorderNode
-from .video_segment_extender import VideoSegmentPrepare, VideoSegmentSave
+from .video_segment_extender import (
+    LatentShapeDebug,
+    VideoSegmentPrepare,
+    VideoSegmentSave,
+)
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
@@ -9,6 +13,7 @@ NODE_CLASS_MAPPINGS = {
     "PixelatedBorderNode": PixelatedBorderNode,
     "VideoSegmentPrepare": VideoSegmentPrepare,
     "VideoSegmentSave": VideoSegmentSave,
+    "LatentShapeDebug": LatentShapeDebug,
     # Mantido para compatibilidade com workflows antigos
 }
 
@@ -18,4 +23,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PixelatedBorderNode": "Pixelated Border Node",
     "VideoSegmentPrepare": "Video Segment Prepare",
     "VideoSegmentSave": "Video Segment Save",
+    "LatentShapeDebug": "Latent Shape Debug",
 }

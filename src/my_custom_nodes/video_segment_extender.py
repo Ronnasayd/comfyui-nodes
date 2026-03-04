@@ -329,6 +329,163 @@ def _remove_frames_from_end(
     )
 
 
+def _extract_latent_overlap(latent_dict: dict, overlap_frames: int) -> dict:
+    """Extrai apenas os últimos N frames do latent para economia de memória.
+
+    Args:
+        latent_dict: Dict com chave "samples" contendo tensor latent [B, C, F, H, W]
+        overlap_frames: Número de frames finais a extrair (0 = salva todos)
+
+    Returns:
+        Dict com latent contendo apenas os frames de overlap
+    """
+    if overlap_frames <= 0 or latent_dict is None:
+        return latent_dict
+
+    samples = latent_dict.get("samples")
+    if samples is None:
+        return latent_dict
+
+    # Detectar dimensão temporal (frames)
+    # Formatos possíveis: [B, C, F, H, W] ou [B, F, C, H, W]
+    shape = samples.shape
+
+    # Assumir formato [B, C, F, H, W] (formato padrão de latent de vídeo)
+    if len(shape) == 5:
+        num_frames = shape[2]  # F é a terceira dimensão
+        if overlap_frames >= num_frames:
+            # Se overlap >= total de frames, retorna tudo
+            return latent_dict
+
+        # Extrair apenas últimos N frames
+        overlap_samples = samples[:, :, -overlap_frames:, :, :].contiguous()
+        return {"samples": overlap_samples}
+    elif len(shape) == 4:
+        # Se for 4D [B, C, H, W], não é vídeo - retorna original
+        logger.warning(
+            f"Latent has 4 dimensions {shape}, expected 5D video latent. Saving as-is."
+        )
+        return latent_dict
+    else:
+        logger.warning(
+            f"Unexpected latent shape {shape}. Expected 5D [B, C, F, H, W]. Saving as-is."
+        )
+        return latent_dict
+
+
+def _crossfade_videos(
+    folder: str,
+    output_path: str,
+    crossfade_frames: int,
+    fps: float,
+    include_initial: bool = True,
+    frame_offset_percent: float = 100.0,
+) -> None:
+    """Concatena vídeos com transição crossfade suave usando ffmpeg xfade filter.
+
+    Args:
+        folder: Pasta do projeto contendo os segmentos
+        output_path: Caminho do arquivo final
+        crossfade_frames: Número de frames para transição (0 = sem crossfade)
+        fps: Taxa de frames por segundo
+        include_initial: Se True, inclui initial_video.mp4 no início
+        frame_offset_percent: Percentual de offset para cortar segmentos
+    """
+    if crossfade_frames <= 0:
+        # Sem crossfade, usar concatenação simples
+        _concat_videos(
+            folder,
+            output_path,
+            include_initial,
+            frame_offset_percent,
+            remove_duplicate_frames=1,  # valor padrão
+            fps=fps,
+        )
+        return
+
+    # Coletar todos os segmentos
+    segments = sorted(
+        [
+            f
+            for f in os.listdir(folder)
+            if f.startswith("segment_") and f.endswith(".mp4")
+        ]
+    )
+
+    # Preparar lista de vídeos para processar
+    video_files = []
+
+    # Incluir vídeo inicial se existir
+    if include_initial:
+        initial_video = os.path.join(folder, "initial_video.mp4")
+        if os.path.exists(initial_video):
+            video_files.append(initial_video)
+
+    # Adicionar segmentos
+    for segment_file in segments:
+        video_files.append(os.path.join(folder, segment_file))
+
+    if len(video_files) == 0:
+        raise RuntimeError("Nenhum vídeo encontrado para concatenar")
+
+    if len(video_files) == 1:
+        # Apenas um vídeo, copiar diretamente
+        shutil.copy2(video_files[0], output_path)
+        return
+
+    # Calcular duração do crossfade em segundos
+    crossfade_duration = crossfade_frames / fps
+
+    # Construir filtro complexo para crossfade
+    # Estratégia: usar xfade filter entre cada par de vídeos
+    filter_parts = []
+    inputs = []
+
+    # Adicionar todos os vídeos como inputs
+    for i, video_file in enumerate(video_files):
+        inputs.extend(["-i", video_file])
+
+    # Construir cadeia de xfade filters
+    # [0][1]xfade[v01]; [v01][2]xfade[v012]; etc.
+    current_label = "0"
+    for i in range(1, len(video_files)):
+        next_label = f"v{i}"
+        filter_parts.append(
+            f"[{current_label}][{i}]xfade=transition=fade:duration={crossfade_duration}:offset=0[{next_label}]"
+        )
+        current_label = next_label
+
+    filter_complex = ";".join(filter_parts)
+
+    # Comando ffmpeg com filtro complexo
+    cmd = (
+        ["ffmpeg", "-y"]
+        + inputs
+        + [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            f"[{current_label}]",
+            "-vcodec",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            output_path,
+        ]
+    )
+
+    subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+
+    if not os.path.exists(output_path):
+        raise RuntimeError("Falha ao concatenar vídeos com crossfade")
+
+
 def _concat_videos(
     folder: str,
     output_path: str,
@@ -512,15 +669,15 @@ class VideoSegmentPrepare:
                     "FLOAT",
                     {"default": 90.0, "min": 50.0, "max": 100.0, "step": 1.0},
                 ),
-                "remove_duplicate_frames": (
-                    "INT",
-                    {"default": 1, "min": 0, "max": 10, "step": 1},
-                ),
             },
             "optional": {
                 "initial_image": ("IMAGE",),
                 "initial_video": ("VIDEO",),
                 "cache_window_size": ("INT", {"default": 4, "min": 1, "max": 20}),
+                "overlap_frames": (
+                    "INT",
+                    {"default": 8, "min": 0, "max": 64, "step": 1},
+                ),
             },
         }
 
@@ -549,10 +706,10 @@ class VideoSegmentPrepare:
         fps,
         frame_blend_count,
         frame_offset_percent,
-        remove_duplicate_frames,
         initial_image=None,
         initial_video=None,
         cache_window_size=4,
+        overlap_frames=8,
     ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
@@ -565,13 +722,14 @@ class VideoSegmentPrepare:
         # Save cache_window_size to project state for VideoSegmentSave
         state_file = os.path.join(project_path, "project_state.json")
         if os.path.exists(state_file):
-            with open(state_file, "r") as f:
+            with open(state_file, "r", encoding="utf-8") as f:
                 state = json.load(f)
         else:
             state = {}
 
         state["cache_window_size"] = cache_window_size
-        with open(state_file, "w") as f:
+        state["overlap_frames"] = overlap_frames
+        with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
         # Load cached latent from previous segment if available
@@ -720,6 +878,14 @@ class VideoSegmentSave:
             },
             "optional": {
                 "latent": ("LATENT",),
+                "overlap_frames": (
+                    "INT",
+                    {"default": 8, "min": 0, "max": 64, "step": 1},
+                ),
+                "crossfade_frames": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 30, "step": 1},
+                ),
             },
         }
 
@@ -740,6 +906,8 @@ class VideoSegmentSave:
         frame_offset_percent,
         remove_duplicate_frames,
         latent=None,
+        overlap_frames=8,
+        crossfade_frames=0,
     ):
         project_path = _get_project_path(project_name)
         max_segments = math.ceil(total_seconds / segment_seconds)
@@ -757,8 +925,12 @@ class VideoSegmentSave:
             cache_path = os.path.join(cache_dir, f"segment_{current_segment:03d}.pt")
 
             try:
-                torch.save(latent, cache_path)
-                logger.info(f"Saved latent cache for segment {current_segment}")
+                # Extrair apenas os últimos N frames do latent para economizar memória
+                overlap_latent = _extract_latent_overlap(latent, overlap_frames)
+                torch.save(overlap_latent, cache_path)
+                logger.info(
+                    f"Saved latent overlap ({overlap_frames} frames) for segment {current_segment}"
+                )
             except Exception as e:
                 logger.warning(f"Failed to save latent cache to {cache_path}: {e}")
 
@@ -767,7 +939,7 @@ class VideoSegmentSave:
             cache_window_size = 4  # default
             if os.path.exists(state_file):
                 try:
-                    with open(state_file, "r") as f:
+                    with open(state_file, "r", encoding="utf-8") as f:
                         state = json.load(f)
                     cache_window_size = state.get("cache_window_size", 4)
                 except Exception as e:
@@ -795,14 +967,106 @@ class VideoSegmentSave:
         # Verifica se finalizou e concatena
         if current_segment >= max_segments:
             final_video = os.path.join(project_path, "final_video.mp4")
-            _concat_videos(
-                project_path,
-                final_video,
-                include_initial=True,
-                frame_offset_percent=frame_offset_percent,
-                remove_duplicate_frames=remove_duplicate_frames,
-                fps=fps,
-            )
+
+            # Usar crossfade se configurado, senão concatenação simples
+            if crossfade_frames > 0:
+                _crossfade_videos(
+                    project_path,
+                    final_video,
+                    crossfade_frames=crossfade_frames,
+                    fps=fps,
+                    include_initial=True,
+                    frame_offset_percent=frame_offset_percent,
+                )
+            else:
+                _concat_videos(
+                    project_path,
+                    final_video,
+                    include_initial=True,
+                    frame_offset_percent=frame_offset_percent,
+                    remove_duplicate_frames=remove_duplicate_frames,
+                    fps=fps,
+                )
             return (int(current_segment), True, str(final_video))
 
         return (int(current_segment), False, "")
+
+
+# ============================================================
+# Node 3 — LatentShapeDebug
+# ============================================================
+
+
+class LatentShapeDebug:
+    """
+    LatentShapeDebug
+    ----------------
+    Node de debug para visualizar as dimensões de um tensor latent.
+
+    Útil para verificar se as operações de slice e concatenação de latents
+    estão funcionando corretamente no pipeline de segmentos de vídeo.
+
+    Inputs:
+        latent: LATENT — tensor latent a ser inspecionado
+
+    Outputs:
+        shape_info : STRING — string formatada com as dimensões [B, C, F, H, W]
+        latent     : LATENT — passa o latent adiante sem modificações
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "LATENT")
+    RETURN_NAMES = ("shape_info", "latent")
+
+    FUNCTION = "debug_shape"
+    OUTPUT_NODE = True
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def debug_shape(self, latent):
+        """Extrai e formata informações sobre as dimensões do latent."""
+        if latent is None:
+            return ("Latent is None", latent)
+
+        samples = latent.get("samples")
+        if samples is None:
+            return ("No 'samples' key in latent dict", latent)
+
+        shape = samples.shape
+        shape_str = f"[{', '.join(str(d) for d in shape)}]"
+
+        # Tentar identificar o formato
+        if len(shape) == 5:
+            b, c, f, h, w = shape
+            info = (
+                f"Shape: {shape_str}\n"
+                f"Format: [B, C, F, H, W]\n"
+                f"Batch: {b}, Channels: {c}, Frames: {f}, Height: {h}, Width: {w}\n"
+                f"Total elements: {samples.numel():,}\n"
+                f"Memory (approx): {samples.numel() * samples.element_size() / (1024**2):.2f} MB"
+            )
+        elif len(shape) == 4:
+            b, c, h, w = shape
+            info = (
+                f"Shape: {shape_str}\n"
+                f"Format: [B, C, H, W] (Image latent)\n"
+                f"Batch: {b}, Channels: {c}, Height: {h}, Width: {w}\n"
+                f"Total elements: {samples.numel():,}\n"
+                f"Memory (approx): {samples.numel() * samples.element_size() / (1024**2):.2f} MB"
+            )
+        else:
+            info = (
+                f"Shape: {shape_str}\n"
+                f"Dimensions: {len(shape)}\n"
+                f"Total elements: {samples.numel():,}\n"
+                f"Memory (approx): {samples.numel() * samples.element_size() / (1024**2):.2f} MB"
+            )
+
+        logger.info(f"LatentShapeDebug: {info.replace(chr(10), ' | ')}")
+        return (info, latent)
