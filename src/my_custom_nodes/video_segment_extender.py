@@ -1679,14 +1679,12 @@ class VideoLatentMask:
 
         # Create a tensor of ones [B, C, F, H, W]
         # Using ones() as the default 'unmasked' state
-        mask = torch.ones(
-            (batch_size, channels, frames, height, width), dtype=torch.float32
-        )
+        mask = torch.ones((batch_size, frames, height, width), dtype=torch.float32)
 
         # Set the first black_frames to 0.0 (masked)
         if black_frames > 0:
             actual_black = min(black_frames, frames)
-            mask[:, :, :actual_black, :, :] = 0.0
+            mask[:, :actual_black] = 0.0
 
             logger.info(
                 f"Generated VideoLatentMask: shape={list(mask.shape)}, "
