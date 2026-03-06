@@ -1697,4 +1697,4 @@ class VideoLatentMask:
                 f"Generated VideoLatentMask (all white): shape={list(mask.shape)}"
             )
 
-        return ({"mask": mask},)
+        return (mask,)
