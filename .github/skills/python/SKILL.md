@@ -1,6 +1,6 @@
 ---
 name: python
-description: "Coding conventions and best practices for Python based on the Google Python Style Guide, emphasizing readability, explicitness, consistent naming, clear docstrings, safe exception handling, small focused functions, and static typing for writing maintainable production-quality Python code."
+description: Coding conventions and best practices for Python based on the Google Python Style Guide, emphasizing readability, explicitness, consistent naming, clear docstrings, safe exception handling, small focused functions, and static typing for writing maintainable production-quality Python code.
 ---
 
 # Skill: Python (Google Style Guide)
@@ -25,8 +25,6 @@ Recommended tools:
 - pylint
 - Black or Pyink formatter
 - type checkers (pytype, mypy)
-
-Running a linter helps detect common errors and style violations early. :contentReference[oaicite:1]{index=1}
 
 ---
 
