@@ -1669,7 +1669,7 @@ class VideoLatentMask:
             }
         }
 
-    RETURN_TYPES = ("LATENT",)
+    RETURN_TYPES = ("MASK",)
     RETURN_NAMES = ("mask",)
     FUNCTION = "generate_mask"
     CATEGORY = "MYNodes/VideoSegment"
@@ -1679,7 +1679,9 @@ class VideoLatentMask:
 
         # Create a tensor of ones [B, C, F, H, W]
         # Using ones() as the default 'unmasked' state
-        mask = torch.ones((batch_size, channels, frames, height, width), dtype=torch.float32)
+        mask = torch.ones(
+            (batch_size, channels, frames, height, width), dtype=torch.float32
+        )
 
         # Set the first black_frames to 0.0 (masked)
         if black_frames > 0:
@@ -1691,6 +1693,8 @@ class VideoLatentMask:
                 f"black_frames={actual_black}/{frames}"
             )
         else:
-            logger.info(f"Generated VideoLatentMask (all white): shape={list(mask.shape)}")
+            logger.info(
+                f"Generated VideoLatentMask (all white): shape={list(mask.shape)}"
+            )
 
-        return ({"samples": mask},)
+        return ({"mask": mask},)
