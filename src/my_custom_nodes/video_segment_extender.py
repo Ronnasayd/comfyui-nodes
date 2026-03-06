@@ -1646,3 +1646,51 @@ class ConditioningExtendFrames:
         except Exception as e:
             logger.error(f"Failed to extend conditioning frames: {e}", exc_info=True)
             raise
+
+
+class VideoLatentMask:
+    """
+    Generate a frame-wise mask for 5D video latents [B, C, F, H, W].
+    The first 'black_frames' are set to 0.0, and the rest are set to 1.0.
+    This is useful for preserving the first few frames of a video segment
+    while allowing subsequent frames to be modified by the model.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "channels": ("INT", {"default": 16, "min": 1, "max": 128}),
+                "frames": ("INT", {"default": 16, "min": 1, "max": 256}),
+                "height": ("INT", {"default": 64, "min": 8, "max": 4096, "step": 8}),
+                "width": ("INT", {"default": 64, "min": 8, "max": 4096, "step": 8}),
+                "black_frames": ("INT", {"default": 4, "min": 0, "max": 256}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("mask",)
+    FUNCTION = "generate_mask"
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def generate_mask(self, batch_size, channels, frames, height, width, black_frames):
+        """Generate a 5D latent mask [B, C, F, H, W]."""
+
+        # Create a tensor of ones [B, C, F, H, W]
+        # Using ones() as the default 'unmasked' state
+        mask = torch.ones((batch_size, channels, frames, height, width), dtype=torch.float32)
+
+        # Set the first black_frames to 0.0 (masked)
+        if black_frames > 0:
+            actual_black = min(black_frames, frames)
+            mask[:, :, :actual_black, :, :] = 0.0
+
+            logger.info(
+                f"Generated VideoLatentMask: shape={list(mask.shape)}, "
+                f"black_frames={actual_black}/{frames}"
+            )
+        else:
+            logger.info(f"Generated VideoLatentMask (all white): shape={list(mask.shape)}")
+
+        return ({"samples": mask},)

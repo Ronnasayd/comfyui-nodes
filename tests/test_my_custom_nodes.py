@@ -8,7 +8,7 @@ import tempfile
 import pytest
 import torch
 
-from src.my_custom_nodes.nodes import AspectRatioCrop, PixelatedBorderNode
+from src.my_custom_nodes.nodes import AspectRatioCrop, PixelatedBorderNode, VideoLatentMask
 from src.my_custom_nodes.video_segment_extender import (
     VideoSegmentPrepare,
     VideoSegmentSave,
@@ -283,12 +283,85 @@ def test_overlap_frame_extraction():
     assert torch.allclose(overlap_latent, full_latent[:, :, -8:, :, :])
 
 
-def test_latent_dict_format():
-    """Test that latent dict format matches ComfyUI expectations."""
-    latent = {"samples": torch.randn(1, 4, 32, 64, 64)}
+# ============================================================
+# Tests for VideoLatentMask Node
+# ============================================================
 
-    # Verify structure
-    assert isinstance(latent, dict)
-    assert "samples" in latent
-    assert isinstance(latent["samples"], torch.Tensor)
-    assert len(latent["samples"].shape) == 5  # Video latent
+
+@pytest.fixture
+def video_latent_mask_node():
+    """Fixture para criar uma instância do VideoLatentMask."""
+    return VideoLatentMask()
+
+
+def test_video_latent_mask_initialization(video_latent_mask_node):
+    """Testa se o nó VideoLatentMask pode ser instanciado."""
+    assert isinstance(video_latent_mask_node, VideoLatentMask)
+
+
+def test_video_latent_mask_metadata():
+    """Testa os metadados do nó VideoLatentMask."""
+    assert VideoLatentMask.RETURN_TYPES == ("LATENT",)
+    assert VideoLatentMask.RETURN_NAMES == ("mask",)
+    assert VideoLatentMask.FUNCTION == "generate_mask"
+    assert VideoLatentMask.CATEGORY == "MYNodes/VideoSegment"
+
+
+def test_video_latent_mask_shape(video_latent_mask_node):
+    """Testa se o formato do tensor gerado está correto [B, C, F, H, W]."""
+    B, C, F, H, W = 1, 16, 16, 64, 64
+    result = video_latent_mask_node.generate_mask(B, C, F, H, W, 4)
+
+    assert isinstance(result, tuple)
+    assert isinstance(result[0], dict)
+    assert "samples" in result[0]
+
+    mask = result[0]["samples"]
+    assert mask.shape == (B, C, F, H, W)
+    assert mask.dtype == torch.float32
+
+
+def test_video_latent_mask_content(video_latent_mask_node):
+    """Testa se o conteúdo da máscara está correto (preto vs branco)."""
+    B, C, F, H, W = 1, 4, 10, 8, 8
+    black_frames = 4
+    result = video_latent_mask_node.generate_mask(B, C, F, H, W, black_frames)
+    mask = result[0]["samples"]
+
+    # Verifica frames pretos (0.0)
+    for f in range(black_frames):
+        assert torch.all(mask[:, :, f, :, :] == 0.0)
+
+    # Verifica frames brancos (1.0)
+    for f in range(black_frames, F):
+        assert torch.all(mask[:, :, f, :, :] == 1.0)
+
+
+def test_video_latent_mask_edge_cases(video_latent_mask_node):
+    """Testa casos extremos: black_frames=0 e black_frames=total_frames."""
+    B, C, F, H, W = 1, 4, 10, 8, 8
+
+    # Caso 1: black_frames = 0 (toda branca)
+    result_white = video_latent_mask_node.generate_mask(B, C, F, H, W, 0)
+    mask_white = result_white[0]["samples"]
+    assert torch.all(mask_white == 1.0)
+
+    # Caso 2: black_frames = F (toda preta)
+    result_black = video_latent_mask_node.generate_mask(B, C, F, H, W, F)
+    mask_black = result_black[0]["samples"]
+    assert torch.all(mask_black == 0.0)
+
+    # Caso 3: black_frames > F (deve limitar ao total de frames e ser toda preta)
+    result_over = video_latent_mask_node.generate_mask(B, C, F, H, W, F + 5)
+    mask_over = result_over[0]["samples"]
+    assert torch.all(mask_over == 0.0)
+
+
+def test_video_latent_mask_registration():
+    """Verifica se o nó está registrado corretamente no NODE_CLASS_MAPPINGS."""
+    from src.my_custom_nodes.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+    assert "VideoLatentMask" in NODE_CLASS_MAPPINGS
+    assert NODE_CLASS_MAPPINGS["VideoLatentMask"] == VideoLatentMask
+    assert "VideoLatentMask" in NODE_DISPLAY_NAME_MAPPINGS
+    assert NODE_DISPLAY_NAME_MAPPINGS["VideoLatentMask"] == "Video Latent Mask"

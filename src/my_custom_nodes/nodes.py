@@ -6,6 +6,7 @@ from .video_segment_extender import (
     LatentExtendFrames,
     LatentPrependCache,
     LatentShapeDebug,
+    VideoLatentMask,
     VideoSegmentPrepare,
     VideoSegmentSave,
 )
@@ -22,6 +23,7 @@ NODE_CLASS_MAPPINGS = {
     "LatentPrependCache": LatentPrependCache,
     "LatentExtendFrames": LatentExtendFrames,
     "ConditioningExtendFrames": ConditioningExtendFrames,
+    "VideoLatentMask": VideoLatentMask,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -35,4 +37,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentPrependCache": "Latent Prepend Cache",
     "LatentExtendFrames": "Latent Extend Frames",
     "ConditioningExtendFrames": "Conditioning Extend Frames",
+    "VideoLatentMask": "Video Latent Mask",
 }

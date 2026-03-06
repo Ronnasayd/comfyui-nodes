@@ -107,13 +107,55 @@
         "recommendedSubtasks": 8,
         "expansionPrompt": "Break down this task into subtasks for: (1) designing and implementing disk-based latent frame caching helpers, (2) updating segment save logic to invoke latent cache creation, (3) modifying segment preparation to load and prepend cached latents, (4) implementing robust error handling and cache fallback logic, (5) developing overlap-aware video segment concatenation including ffmpeg integration and crossfade/overlap interplay, (6) comprehensive logging and backward compatibility toggles, (7) writing unit and integration tests in designated test suites for all scenarios, and (8) creating thorough documentation covering usage, troubleshooting, workflow diagrams, and code review checklist.",
         "updatedAt": "2026-03-04T21:11:10.536Z"
+      },
+      {
+        "id": "2",
+        "title": "Implement VideoLatentMask Node for Frame-wise Mask Generation in ComfyUI",
+        "description": "Develop a new ComfyUI node, VideoLatentMask, for generating frame-wise masks on 5D video latents where initial frames are masked and subsequent frames are unmasked, enabling temporal video workflows.",
+        "details": "1. Implement the VideoLatentMask class in src/my_custom_nodes/video_segment_extender.py, following ComfyUI node conventions. Define INPUT_TYPES to parameterize batch_size, channels, frames, height, width, and black_frames. Use torch operations (torch.ones, torch.zeros, or torch.full) to allocate a 5D tensor of shape [B, C, F, H, W] and set masked frames to 0.0.  \n2. Add clear docstrings for class and method explaining the masking logic, parameter usage, and temporal application.  \n3. Register the node by updating src/my_custom_nodes/nodes.py: import VideoLatentMask, add it to NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS.  \n4. Ensure code quality by running ruff for style checks and mypy for type safety; follow PEP8 and PyTorch best practices (prefer in-place operations and device consistency).  \n5. Document the new node’s workflow, referencing sample usage and integration for video-to-video segment transitions, in docs/features/dd-MM-YYYY-VideoLatentMask/README.md.",
+        "testStrategy": "1. Create unit tests in tests/test_my_custom_nodes.py to verify: (a) Output tensor shape matches [B, C, F, H, W] for various inputs; (b) Mask region is set to 0.0 for first `black_frames` and 1.0 thereafter; (c) Edge case handling, including black_frames=0 (all unmasked) and black_frames=frames (all masked).  \n2. Include tests to confirm the node registration in NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS.  \n3. Run ruff and mypy to check for code style and static typing errors.  \n4. Validate integration in ComfyUI workflows by confirming expected output in video segment extender scenarios.  \n5. Review README documentation for completeness and accuracy.",
+        "status": "done",
+        "dependencies": [
+          "1"
+        ],
+        "priority": "medium",
+        "subtasks": [
+          {
+            "id": 1,
+            "title": "Implement VideoLatentMask Node with Frame-wise Mask Generation Logic",
+            "description": "Develop the VideoLatentMask class in src/my_custom_nodes/video_segment_extender.py, using ComfyUI conventions. Implement tensor logic to generate 5D masks, parameterize batch_size, channels, frames, height, width, and black_frames, and ensure correct masked/unmasked region allocation.",
+            "dependencies": [],
+            "details": "Create the VideoLatentMask class in src/my_custom_nodes/video_segment_extender.py. Define INPUT_TYPES for batch_size, channels, frames, height, width, and black_frames. Implement the generate_mask method: allocate a 5D tensor (shape [B, C, F, H, W]), set the first black_frames along the F axis to 0.0, the rest to 1.0, and return as a ComfyUI latent dictionary. Use torch operations (zeros, ones, or full), enforce device consistency, add clear docstrings explaining logic and intended workflow usage, and follow PEP8 and PyTorch best practices.",
+            "status": "done",
+            "testStrategy": "Unit tests: Verify tensor shape/output for multiple input sets, first black_frames correctly set to 0.0, remaining frames set to 1.0, and edge cases (black_frames=0 or frames) in tests/test_my_custom_nodes.py.",
+            "parentId": "undefined",
+            "updatedAt": "2026-03-06T22:27:21.172Z"
+          },
+          {
+            "id": 2,
+            "title": "Register VideoLatentMask Node, Validate Integration, and Document Workflow",
+            "description": "Register VideoLatentMask in src/my_custom_nodes/nodes.py, adding it to NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS. Write unit tests for integration, validate node visibility, and document usage and parameters in docs/features/dd-MM-YYYY-VideoLatentMask/README.md.",
+            "dependencies": [
+              1
+            ],
+            "details": "In src/my_custom_nodes/nodes.py, import VideoLatentMask, add it to NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS. In tests/test_my_custom_nodes.py, add tests confirming registration (node lookup works), integration (can instantiate and call), and parameter validation. Run ruff and mypy for code quality and type safety. Create documentation detailing workflow, usage example, parameter meanings, and integration points; save in docs/features/dd-MM-YYYY-VideoLatentMask/README.md.",
+            "status": "done",
+            "testStrategy": "Integration tests: Confirm node registration and availability in ComfyUI, verify instantiation, validate parameters via unit tests. Manual or automated documentation review to ensure clarity and completeness.",
+            "parentId": "undefined",
+            "updatedAt": "2026-03-06T22:30:22.171Z"
+          }
+        ],
+        "complexity": 4,
+        "recommendedSubtasks": 2,
+        "expansionPrompt": "Expand this task into subtasks for: (1) implementing the VideoLatentMask node (including tensor allocation and mask logic), and (2) registering the node, writing unit tests, validating integration, and documenting workflow and parameters.",
+        "updatedAt": "2026-03-06T22:30:22.171Z"
       }
     ],
     "metadata": {
       "version": "1.0.0",
-      "lastModified": "2026-03-04T21:11:10.537Z",
-      "taskCount": 1,
-      "completedCount": 0,
+      "lastModified": "2026-03-06T22:30:22.171Z",
+      "taskCount": 2,
+      "completedCount": 1,
       "tags": [
         "master"
       ]
