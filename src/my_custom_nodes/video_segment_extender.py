@@ -1674,25 +1674,24 @@ class VideoLatentMask:
     FUNCTION = "generate_mask"
     CATEGORY = "MYNodes/VideoSegment"
 
-    def generate_mask(self, batch_size, channels, frames, height, width, black_frames):
-        """Generate a 5D latent mask [B, C, F, H, W]."""
+    def generate_mask(
+        self, batch_size, frames, height, width, black_frames, fade_frames
+    ):
 
-        # Create a tensor of ones [B, C, F, H, W]
-        # Using ones() as the default 'unmasked' state
         mask = torch.ones((batch_size, frames, height, width), dtype=torch.float32)
 
-        # Set the first black_frames to 0.0 (masked)
-        if black_frames > 0:
-            actual_black = min(black_frames, frames)
-            mask[:, :actual_black] = 0.0
+        black_frames = min(black_frames, frames)
 
-            logger.info(
-                f"Generated VideoLatentMask: shape={list(mask.shape)}, "
-                f"black_frames={actual_black}/{frames}"
-            )
-        else:
-            logger.info(
-                f"Generated VideoLatentMask (all white): shape={list(mask.shape)}"
-            )
+        # parte completamente preservada
+        mask[:, :black_frames] = 0.0
+
+        # fade progressivo
+        for i in range(fade_frames):
+            frame_index = black_frames + i
+            if frame_index >= frames:
+                break
+
+            value = (i + 1) / (fade_frames + 1)
+            mask[:, frame_index] = value
 
         return (mask,)
