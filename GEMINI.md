@@ -87,3 +87,6 @@ mypy .
 
 - @.github/instructions/workspace.instructions.md
 - @.github/instructions/copilot.instructions.md
+
+## References:
+@.github/instructions/orchestration.instructions.md

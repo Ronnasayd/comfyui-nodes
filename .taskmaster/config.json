@@ -14,8 +14,8 @@
     },
     "fallback": {
       "provider": "ollama",
-      "modelId": "gpt-oss:120b",
-      "maxTokens": 128000,
+      "modelId": "llama3.3:latest",
+      "maxTokens": 8000,
       "temperature": 0.2
     }
   },
@@ -34,10 +34,5 @@
     "azureOpenaiBaseURL": "https://your-endpoint.openai.azure.com/",
     "userId": "1234567890"
   },
-  "claudeCode": {},
-  "grokCli": {
-    "timeout": 120000,
-    "workingDirectory": null,
-    "defaultModel": "grok-4-latest"
-  }
+  "claudeCode": {}
 }

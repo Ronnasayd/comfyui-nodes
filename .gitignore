@@ -112,3 +112,11 @@ yarn-error.log*
 node.zip
 .vscode/
 .claude/
+.github/skills/
+.github/prompts/
+.github/instructions/
+.github/agents/
+.github/hooks/
+.agent/skills/
+GEMINI.md
+.taskmaster/
