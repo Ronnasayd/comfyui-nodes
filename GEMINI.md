@@ -85,8 +85,8 @@ mypy .
 - Metadata such as `RETURN_TYPES`, `FUNCTION`, and `CATEGORY` must be explicitly defined in each node class.
 - The project follows the `tool.comfy` configuration in `pyproject.toml` for registry publishing.
 
-- @.github/instructions/workspace.instructions.md
-- @.github/instructions/copilot.instructions.md
+## References:
+@.github/instructions/copilot.instructions.md
 
 ## References:
 @.github/instructions/orchestration.instructions.md
