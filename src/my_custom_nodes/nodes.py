@@ -9,6 +9,7 @@ from .video_segment_extender import (
     VideoLatentMask,
     VideoSegmentPrepare,
     VideoSegmentSave,
+    VaceControlPrepare,
 )
 
 # A dictionary that contains all nodes you want to export with their names
@@ -24,6 +25,7 @@ NODE_CLASS_MAPPINGS = {
     "LatentExtendFrames": LatentExtendFrames,
     "ConditioningExtendFrames": ConditioningExtendFrames,
     "VideoLatentMask": VideoLatentMask,
+    "VaceControlPrepare": VaceControlPrepare,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -38,4 +40,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentExtendFrames": "Latent Extend Frames",
     "ConditioningExtendFrames": "Conditioning Extend Frames",
     "VideoLatentMask": "Video Latent Mask",
+    "VaceControlPrepare": "VACE Control Prepare",
 }

@@ -50,6 +50,54 @@ def _run_subprocess(cmd: List[str], error_message: str) -> subprocess.CompletedP
     return result
 
 
+def _load_video_as_tensor(video_path: str) -> torch.Tensor:
+    """Load a video file as a torch tensor [F, H, W, 3]."""
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    # Get video info to determine resolution
+    cmd_info = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+        video_path,
+    ]
+    res = _run_subprocess(cmd_info, "Failed to get video resolution").stdout.strip()
+    w, h = map(int, res.split("x"))
+
+    # Extract all frames using ffmpeg to stdout
+    cmd = [
+        "ffmpeg",
+        "-i",
+        video_path,
+        "-f",
+        "image2pipe",
+        "-pix_fmt",
+        "rgb24",
+        "-vcodec",
+        "rawvideo",
+        "-",
+    ]
+
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8
+    )
+    raw_video, _ = process.communicate()
+
+    if process.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed to extract frames from {video_path}")
+
+    # Convert bytes to tensor
+    video_np = np.frombuffer(raw_video, dtype=np.uint8).reshape(-1, h, w, 3)
+    return torch.from_numpy(video_np).float() / 255.0
+
+
 def _get_video_duration(video_path: str) -> float:
     cmd = [
         "ffprobe",
@@ -865,13 +913,14 @@ class VideoSegmentPrepare:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING", "LATENT")
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING", "LATENT", "IMAGE")
     RETURN_NAMES = (
         "next_image",
         "current_segment",
         "finished",
         "final_video_path",
         "cached_latent",
+        "last_segment_video",
     )
 
     FUNCTION = "prepare"
@@ -972,10 +1021,11 @@ class VideoSegmentPrepare:
         if current_segment == 0:
             if initial_image is not None:
                 logger.info("Segment 0: Using initial_image, no cached latent")
-                return (initial_image, 0, False, "", None)
+                return (initial_image, 0, False, "", None, initial_image)
             else:
                 logger.warning("Segment 0: No initial_image provided, using fallback")
-                return (torch.zeros((1, 512, 512, 3)), 0, False, "", None)
+                fallback = torch.zeros((1, 512, 512, 3))
+                return (fallback, 0, False, "", None, fallback)
 
         # Subsequent segments: extract blended frame and load cached latent
         cached_latent = None
@@ -1041,11 +1091,20 @@ class VideoSegmentPrepare:
                     f"is sufficient for temporal smoothness."
                 )
 
-            return (frame, current_segment, False, "", cached_latent)
+            # Load full last segment video for VACE
+            try:
+                last_segment_video = _load_video_as_tensor(last_segment)
+                logger.info(f"Loaded last segment video for VACE: {list(last_segment_video.shape)}")
+            except Exception as e:
+                logger.warning(f"Failed to load last segment video: {e}")
+                last_segment_video = frame
+
+            return (frame, current_segment, False, "", cached_latent, last_segment_video)
 
         # Fallback (should rarely happen)
         logger.warning(f"Segment {current_segment}: Using fallback zero tensor")
-        return (torch.zeros((1, 512, 512, 3)), 0, False, "", cached_latent)
+        fallback = torch.zeros((1, 512, 512, 3))
+        return (fallback, 0, False, "", cached_latent, fallback)
 
 
 class VideoSegmentSave:
@@ -1066,6 +1125,7 @@ class VideoSegmentSave:
                 "latent": ("LATENT",),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
                 "crossfade_frames": ("INT", {"default": 0, "min": 0, "max": 16}),
+                "trim_latent": ("INT", {"default": 0, "min": 0, "max": 64}),
             },
         }
 
@@ -1088,6 +1148,7 @@ class VideoSegmentSave:
         latent=None,
         overlap_frames=0,
         crossfade_frames=0,
+        trim_latent=0,
     ):
         """
         Save video segment and cache latent frames for temporal consistency.
@@ -1116,6 +1177,28 @@ class VideoSegmentSave:
         if os.path.exists(seg_path):
             logger.error(f"Segment file already exists: {seg_path}")
             raise RuntimeError("Segment overwrite prevented")
+
+        # Handle trim_latent (e.g. from WanVace output)
+        if trim_latent > 0:
+            if hasattr(video, "get_components"):
+                # Handle cases where video might be a composite object
+                pass
+            elif isinstance(video, torch.Tensor):
+                # ComfyUI IMAGE batch is [F, H, W, C]
+                if video.shape[0] > trim_latent:
+                    logger.info(f"Trimming first {trim_latent} frames from video (shape before: {list(video.shape)})")
+                    video = video[trim_latent:]
+                    logger.info(f"Shape after trim: {list(video.shape)}")
+                else:
+                    logger.warning(f"trim_latent ({trim_latent}) >= video frames ({video.shape[0]}), nothing left to trim!")
+
+            if latent is not None and "samples" in latent:
+                # Video latent is [B, C, F, H, W]
+                samples = latent["samples"]
+                if samples.shape[2] > trim_latent:
+                    logger.info(f"Trimming first {trim_latent} frames from latent (shape before: {list(samples.shape)})")
+                    latent = {"samples": samples[:, :, trim_latent:, :, :]}
+                    logger.info(f"Shape after trim: {list(latent['samples'].shape)}")
 
         # Save video segment
         _save_video_tensor(video, seg_path, fps)
@@ -1706,3 +1789,72 @@ class VideoLatentMask:
             )
 
         return (mask,)
+
+
+class VaceControlPrepare:
+    """
+    Prepare control inputs for WanVaceToVideo node.
+    Constructs a control_video with context frames followed by gray padding,
+    and a temporal mask.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "last_segment_video": ("IMAGE",),
+                "total_length": ("INT", {"default": 81, "min": 1, "max": 256}),
+                "context_frames": ("INT", {"default": 8, "min": 1, "max": 64}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE")
+    RETURN_NAMES = ("control_video", "control_masks", "reference_image")
+    FUNCTION = "prepare"
+    CATEGORY = "MYNodes/VideoSegment"
+
+    def prepare(self, last_segment_video, total_length, context_frames):
+        """
+        Construct VACE control tensors.
+        - control_video: [context_frames from last_segment] + [gray padding]
+        - control_masks: [0.0 for context] + [1.0 for generation]
+        - reference_image: last frame of context
+        """
+        # last_segment_video is [F, H, W, 3]
+        f, h, w, c = last_segment_video.shape
+
+        # 1. Extract context frames (tail of previous segment)
+        actual_context = min(context_frames, f)
+        context_tail = last_segment_video[-actual_context:]
+
+        # 2. Construct control_video
+        # Gray value for VACE is 127/255 ~= 0.498 or exactly 0.5
+        gray_value = 127.0 / 255.0
+        padding_length = max(0, total_length - actual_context)
+
+        if padding_length > 0:
+            gray_padding = torch.full((padding_length, h, w, c), gray_value, dtype=torch.float32)
+            control_video = torch.cat([context_tail, gray_padding], dim=0)
+        else:
+            control_video = context_tail[:total_length]
+
+        # 3. Construct control_masks (Temporal mask)
+        # ComfyUI MASK is [F, H, W] or [H, W]
+        # For VACE extension: 0.0 (keep) for context, 1.0 (generate) for padding
+        mask_context = torch.zeros((actual_context, h, w), dtype=torch.float32)
+        if padding_length > 0:
+            mask_padding = torch.ones((padding_length, h, w), dtype=torch.float32)
+            control_masks = torch.cat([mask_context, mask_padding], dim=0)
+        else:
+            control_masks = mask_context[:total_length]
+
+        # 4. Reference image (First frame of generation or last of context)
+        # VACE uses this as a hard constraint for character/style
+        reference_image = context_tail[-1:].clone()
+
+        logger.info(
+            f"VaceControlPrepare: total_length={total_length}, context={actual_context}, "
+            f"video_shape={list(control_video.shape)}, mask_shape={list(control_masks.shape)}"
+        )
+
+        return (control_video, control_masks, reference_image)
