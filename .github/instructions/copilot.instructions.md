@@ -1,1 +1,0 @@
-/home/ronnas/develop/personal/AI-pair-programming/instructions/copilot.instructions.md
