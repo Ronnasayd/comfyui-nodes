@@ -10,6 +10,9 @@ import folder_paths
 import numpy as np
 import torch
 from PIL import Image
+import comfy.utils
+import comfy.model_management
+from comfy import node_helpers
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +894,122 @@ def _concat_videos_with_overlap_and_crossfade(
 # ============================================================
 
 
+class WanImagesToVideo:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "vae": ("VAE",),
+                "images": ("IMAGE",),
+                "length": ("INT", {"default": 81, "min": 1, "max": 256}),
+                "width": ("INT", {"default": 832, "min": 128, "max": 2048, "step": 8}),
+                "height": ("INT", {"default": 480, "min": 128, "max": 2048, "step": 8}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+            },
+            "optional": {
+                "clip_vision_output": ("CLIP_VISION_OUTPUT",),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "negative", "latent")
+    FUNCTION = "encode"
+    CATEGORY = "MYNodes/Wan"
+
+    def encode(
+        self,
+        positive,
+        negative,
+        vae,
+        images,
+        length,
+        width,
+        height,
+        batch_size,
+        clip_vision_output=None,
+    ):
+        # 1. Create a zeroed latent [B, 16, T, H/8, W/8] for the generator
+        latent_t = (length - 1) // 4 + 1
+        latent_h = height // 8
+        latent_w = width // 8
+        latent = torch.zeros(
+            [batch_size, 16, latent_t, latent_h, latent_w],
+            device=comfy.model_management.intermediate_device(),
+        )
+
+        # 2. Prepare and encode images into 'concat_latent_image' and 'concat_mask'
+        # images is [N, H, W, 3] where N = total images (e.g. 4)
+        num_images = images.shape[0]
+
+        # Upscale all images
+        # images [N, H, W, 3] -> move dim -> [N, 3, H, W] -> upscale -> [N, 3, target_H, target_W]
+        images_upscaled = comfy.utils.common_upscale(
+            images.movedim(-1, 1), width, height, "bilinear", "center"
+        ).movedim(1, -1)
+
+        # Create a video tensor [T, H, W, C] filled with 0.5 (gray)
+        # Note: WanImageToVideo creates [length, height, width, 3]
+        # We need to overlay our `num_images` at the start
+        video_input = torch.ones(
+            (length, height, width, 3),
+            device=images_upscaled.device,
+            dtype=images_upscaled.dtype,
+        ) * 0.5
+
+        # Limit overlay to video length
+        actual_length = min(num_images, length)
+        video_input[:actual_length] = images_upscaled[:actual_length]
+
+        # Encode video to get concat_latent_image [1, 16, T, H, W]
+        # vae.encode expects [B, H, W, 3] typically, but for video VAEs it might differ.
+        # WanImageToVideo uses: vae.encode(image[:, :, :, :3]) where image is [L, H, W, C]
+        # This seems to rely on the VAE handling the 'L' dimension as batch or internal reshape.
+        concat_latent_image = vae.encode(video_input[:, :, :, :3])
+
+        # 3. Create concat_mask [1, 1, T, H, W]
+        # 0.0 = keep (context), 1.0 = generate
+        # Latent frames corresponding to input images:
+        fixed_latent_frames = (actual_length - 1) // 4 + 1
+
+        mask = torch.ones(
+            (
+                1,
+                1,
+                latent_t,
+                concat_latent_image.shape[-2],
+                concat_latent_image.shape[-1],
+            ),
+            device=images_upscaled.device,
+            dtype=images_upscaled.dtype,
+        )
+        mask[:, :, :fixed_latent_frames] = 0.0
+
+        # 4. Patch conditioning
+        positive = node_helpers.conditioning_set_values(
+            positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask}
+        )
+        negative = node_helpers.conditioning_set_values(
+            negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask}
+        )
+
+        if clip_vision_output is not None:
+            positive = node_helpers.conditioning_set_values(
+                positive, {"clip_vision_output": clip_vision_output}
+            )
+            negative = node_helpers.conditioning_set_values(
+                negative, {"clip_vision_output": clip_vision_output}
+            )
+
+        logger.info(
+            f"WanImagesToVideo: encoded {actual_length} images into {fixed_latent_frames} "
+            f"fixed latent frames. Total video length: {length} ({latent_t} latents)"
+        )
+
+        return (positive, negative, {"samples": latent})
+
+
 class VideoSegmentPrepare:
 
     @classmethod
@@ -910,10 +1029,11 @@ class VideoSegmentPrepare:
                 "latent": ("LATENT",),
                 "cache_window_size": ("INT", {"default": 4}),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
+                "context_frames": ("INT", {"default": 1, "min": 1, "max": 64}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING", "LATENT", "IMAGE")
+    RETURN_TYPES = ("IMAGE", "INT", "BOOLEAN", "STRING", "LATENT", "IMAGE", "IMAGE")
     RETURN_NAMES = (
         "next_image",
         "current_segment",
@@ -921,6 +1041,7 @@ class VideoSegmentPrepare:
         "final_video_path",
         "cached_latent",
         "last_segment_video",
+        "context_images",
     )
 
     FUNCTION = "prepare"
@@ -948,6 +1069,7 @@ class VideoSegmentPrepare:
         latent=None,
         cache_window_size=4,
         overlap_frames=0,
+        context_frames=1,
     ):
         """
         Prepare the next video segment by determining the starting frame and cached latent.
@@ -1015,21 +1137,24 @@ class VideoSegmentPrepare:
                 True,
                 final_path if os.path.exists(final_path) else "",
                 latent,
+                initial_image,
+                initial_image,
             )
 
         # First segment: use initial_image, no cached latent
         if current_segment == 0:
             if initial_image is not None:
                 logger.info("Segment 0: Using initial_image, no cached latent")
-                return (initial_image, 0, False, "", None, initial_image)
+                return (initial_image, 0, False, "", None, initial_image, initial_image)
             else:
                 logger.warning("Segment 0: No initial_image provided, using fallback")
                 fallback = torch.zeros((1, 512, 512, 3))
-                return (fallback, 0, False, "", None, fallback)
+                return (fallback, 0, False, "", None, fallback, fallback)
 
         # Subsequent segments: extract blended frame and load cached latent
         cached_latent = None
         last_segment = None
+        context_images = None
 
         if current_segment > 0:
             segments = _list_segments(project_path)
@@ -1091,20 +1216,27 @@ class VideoSegmentPrepare:
                     f"is sufficient for temporal smoothness."
                 )
 
-            # Load full last segment video for VACE
+            # Load full last segment video for VACE and context images
             try:
                 last_segment_video = _load_video_as_tensor(last_segment)
-                logger.info(f"Loaded last segment video for VACE: {list(last_segment_video.shape)}")
+                logger.info(f"Loaded last segment video: {list(last_segment_video.shape)}")
+                
+                # Extract context images (batch of frames)
+                actual_context = min(context_frames, last_segment_video.shape[0])
+                context_images = last_segment_video[-actual_context:]
+                logger.info(f"Extracted {actual_context} context images for WanImagesToVideo")
+                
             except Exception as e:
                 logger.warning(f"Failed to load last segment video: {e}")
                 last_segment_video = frame
+                context_images = frame
 
-            return (frame, current_segment, False, "", cached_latent, last_segment_video)
+            return (frame, current_segment, False, "", cached_latent, last_segment_video, context_images)
 
         # Fallback (should rarely happen)
         logger.warning(f"Segment {current_segment}: Using fallback zero tensor")
         fallback = torch.zeros((1, 512, 512, 3))
-        return (fallback, 0, False, "", cached_latent, fallback)
+        return (fallback, 0, False, "", cached_latent, fallback, fallback)
 
 
 class VideoSegmentSave:
