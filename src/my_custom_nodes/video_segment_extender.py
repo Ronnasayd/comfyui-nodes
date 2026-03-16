@@ -6,13 +6,13 @@ import subprocess
 import tempfile
 from typing import List
 
+import comfy.model_management
+import comfy.utils
 import folder_paths
+import node_helpers
 import numpy as np
 import torch
 from PIL import Image
-import comfy.utils
-import comfy.model_management
-from comfy import node_helpers
 
 logger = logging.getLogger(__name__)
 
@@ -952,11 +952,14 @@ class WanImagesToVideo:
         # Create a video tensor [T, H, W, C] filled with 0.5 (gray)
         # Note: WanImageToVideo creates [length, height, width, 3]
         # We need to overlay our `num_images` at the start
-        video_input = torch.ones(
-            (length, height, width, 3),
-            device=images_upscaled.device,
-            dtype=images_upscaled.dtype,
-        ) * 0.5
+        video_input = (
+            torch.ones(
+                (length, height, width, 3),
+                device=images_upscaled.device,
+                dtype=images_upscaled.dtype,
+            )
+            * 0.5
+        )
 
         # Limit overlay to video length
         actual_length = min(num_images, length)
@@ -1219,19 +1222,31 @@ class VideoSegmentPrepare:
             # Load full last segment video for VACE and context images
             try:
                 last_segment_video = _load_video_as_tensor(last_segment)
-                logger.info(f"Loaded last segment video: {list(last_segment_video.shape)}")
-                
+                logger.info(
+                    f"Loaded last segment video: {list(last_segment_video.shape)}"
+                )
+
                 # Extract context images (batch of frames)
                 actual_context = min(context_frames, last_segment_video.shape[0])
                 context_images = last_segment_video[-actual_context:]
-                logger.info(f"Extracted {actual_context} context images for WanImagesToVideo")
-                
+                logger.info(
+                    f"Extracted {actual_context} context images for WanImagesToVideo"
+                )
+
             except Exception as e:
                 logger.warning(f"Failed to load last segment video: {e}")
                 last_segment_video = frame
                 context_images = frame
 
-            return (frame, current_segment, False, "", cached_latent, last_segment_video, context_images)
+            return (
+                frame,
+                current_segment,
+                False,
+                "",
+                cached_latent,
+                last_segment_video,
+                context_images,
+            )
 
         # Fallback (should rarely happen)
         logger.warning(f"Segment {current_segment}: Using fallback zero tensor")
@@ -1318,17 +1333,23 @@ class VideoSegmentSave:
             elif isinstance(video, torch.Tensor):
                 # ComfyUI IMAGE batch is [F, H, W, C]
                 if video.shape[0] > trim_latent:
-                    logger.info(f"Trimming first {trim_latent} frames from video (shape before: {list(video.shape)})")
+                    logger.info(
+                        f"Trimming first {trim_latent} frames from video (shape before: {list(video.shape)})"
+                    )
                     video = video[trim_latent:]
                     logger.info(f"Shape after trim: {list(video.shape)}")
                 else:
-                    logger.warning(f"trim_latent ({trim_latent}) >= video frames ({video.shape[0]}), nothing left to trim!")
+                    logger.warning(
+                        f"trim_latent ({trim_latent}) >= video frames ({video.shape[0]}), nothing left to trim!"
+                    )
 
             if latent is not None and "samples" in latent:
                 # Video latent is [B, C, F, H, W]
                 samples = latent["samples"]
                 if samples.shape[2] > trim_latent:
-                    logger.info(f"Trimming first {trim_latent} frames from latent (shape before: {list(samples.shape)})")
+                    logger.info(
+                        f"Trimming first {trim_latent} frames from latent (shape before: {list(samples.shape)})"
+                    )
                     latent = {"samples": samples[:, :, trim_latent:, :, :]}
                     logger.info(f"Shape after trim: {list(latent['samples'].shape)}")
 
@@ -1965,7 +1986,9 @@ class VaceControlPrepare:
         padding_length = max(0, total_length - actual_context)
 
         if padding_length > 0:
-            gray_padding = torch.full((padding_length, h, w, c), gray_value, dtype=torch.float32)
+            gray_padding = torch.full(
+                (padding_length, h, w, c), gray_value, dtype=torch.float32
+            )
             control_video = torch.cat([context_tail, gray_padding], dim=0)
         else:
             control_video = context_tail[:total_length]
