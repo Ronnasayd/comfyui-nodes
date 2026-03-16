@@ -895,6 +895,37 @@ def _concat_videos_with_overlap_and_crossfade(
 
 
 class WanImagesToVideo:
+    """
+    Improved multi-image conditioning node for Wan video models.
+
+    Fixes the "frozen first frame" issue present in WanImageToVideo by:
+
+      1. Accepting a SEQUENCE of context images (e.g. the last 8–17 frames of the
+         previous segment) instead of a single start image.
+      2. Locking ALL latent frames covered by those context images so the model
+         receives a genuine temporal-flow prior rather than a single static frame.
+      3. Optionally locking extra_locked_latents additional latent frames to
+         further reinforce temporal context.
+      4. Applying a soft linear mask transition (0 → 1) at the context/generation
+         boundary so the model blends naturally into free generation.
+
+    ── How the Wan video VAE temporal compression works ──────────────────────
+    The VAE has a causal temporal compression ratio of 4×:
+        • Latent frame 0   ↔  pixel frame 0
+        • Latent frame t   ↔  pixel frames 4t-3 … 4t   (t ≥ 1)
+    Therefore N context pixel frames map to (N-1)//4 + 1 latent frames.
+    With N=1  →  1 latent locked   (original WanImageToVideo behaviour – weak)
+    With N=8  →  2 latents locked  (model sees motion direction)
+    With N=17 →  5 latents locked  (strong temporal prior)
+
+    ── Recommended workflow ──────────────────────────────────────────────────
+    • In VideoSegmentPrepare set context_frames = 8 (or higher).
+    • Connect VideoSegmentPrepare.context_images → images
+      (NOT next_image, which is only a single blended frame).
+    • Connect VideoSegmentPrepare.next_image → clip_vision_output pipeline
+      (optional, for style/character consistency).
+    """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -903,13 +934,49 @@ class WanImagesToVideo:
                 "negative": ("CONDITIONING",),
                 "vae": ("VAE",),
                 "images": ("IMAGE",),
-                "length": ("INT", {"default": 81, "min": 1, "max": 256}),
+                "length": (
+                    "INT",
+                    {
+                        "default": 81,
+                        "min": 1,
+                        "max": 256,
+                        "step": 4,
+                        "tooltip": "Total number of pixel frames to generate.",
+                    },
+                ),
                 "width": ("INT", {"default": 832, "min": 128, "max": 2048, "step": 8}),
                 "height": ("INT", {"default": 480, "min": 128, "max": 2048, "step": 8}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
             },
             "optional": {
                 "clip_vision_output": ("CLIP_VISION_OUTPUT",),
+                "extra_locked_latents": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 16,
+                        "tooltip": (
+                            "Additional latent frames to lock beyond the minimum required "
+                            "for the supplied context images.  Increasing this gives the "
+                            "model a stronger temporal anchor (good for extension) at the "
+                            "cost of slightly less generation freedom."
+                        ),
+                    },
+                ),
+                "mask_transition_latents": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 0,
+                        "max": 8,
+                        "tooltip": (
+                            "Number of latent frames over which the mask linearly "
+                            "transitions from 0 (fixed) to 1 (free).  "
+                            "0 = hard cut.  2–3 recommended."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -929,8 +996,10 @@ class WanImagesToVideo:
         height,
         batch_size,
         clip_vision_output=None,
+        extra_locked_latents: int = 0,
+        mask_transition_latents: int = 2,
     ):
-        # 1. Create a zeroed latent [B, 16, T, H/8, W/8] for the generator
+        # ── 1. Allocate blank generation latent [B, 16, T, H/8, W/8] ────────
         latent_t = (length - 1) // 4 + 1
         latent_h = height // 8
         latent_w = width // 8
@@ -939,19 +1008,18 @@ class WanImagesToVideo:
             device=comfy.model_management.intermediate_device(),
         )
 
-        # 2. Prepare and encode images into 'concat_latent_image' and 'concat_mask'
-        # images is [N, H, W, 3] where N = total images (e.g. 4)
+        # ── 2. Upscale all context images to target resolution ───────────────
+        # images: [N, H_src, W_src, 3] → [N, H, W, 3]
         num_images = images.shape[0]
-
-        # Upscale all images
-        # images [N, H, W, 3] -> move dim -> [N, 3, H, W] -> upscale -> [N, 3, target_H, target_W]
         images_upscaled = comfy.utils.common_upscale(
             images.movedim(-1, 1), width, height, "bilinear", "center"
         ).movedim(1, -1)
 
-        # Create a video tensor [T, H, W, C] filled with 0.5 (gray)
-        # Note: WanImageToVideo creates [length, height, width, 3]
-        # We need to overlay our `num_images` at the start
+        # ── 3. Build reference video tensor [length, H, W, 3] ────────────────
+        # Mid-gray (0.5) is the neutral/unknown signal for the Wan VAE.
+        # Context images are placed at the START of the timeline; the rest stays
+        # gray so the encoder sees a plausible "static hold" and the mask tells
+        # the model those frames are to be generated freely.
         video_input = (
             torch.ones(
                 (length, height, width, 3),
@@ -961,20 +1029,42 @@ class WanImagesToVideo:
             * 0.5
         )
 
-        # Limit overlay to video length
         actual_length = min(num_images, length)
         video_input[:actual_length] = images_upscaled[:actual_length]
 
-        # Encode video to get concat_latent_image [1, 16, T, H, W]
-        # vae.encode expects [B, H, W, 3] typically, but for video VAEs it might differ.
-        # WanImageToVideo uses: vae.encode(image[:, :, :, :3]) where image is [L, H, W, C]
-        # This seems to rely on the VAE handling the 'L' dimension as batch or internal reshape.
+        # ── 4. VAE-encode the reference video ────────────────────────────────
+        # concat_latent_image shape: [1, 16, latent_t, H/8, W/8]
         concat_latent_image = vae.encode(video_input[:, :, :, :3])
 
-        # 3. Create concat_mask [1, 1, T, H, W]
-        # 0.0 = keep (context), 1.0 = generate
-        # Latent frames corresponding to input images:
-        fixed_latent_frames = (actual_length - 1) // 4 + 1
+        # ── 5. Compute temporal mask ─────────────────────────────────────────
+        #
+        # Wan causal VAE temporal compression:
+        #   N pixel frames → (N-1)//4 + 1 latent frames
+        #
+        # We lock those latent frames (mask = 0) so the model treats them as
+        # given context.  extra_locked_latents extends this hard region.
+        # mask_transition_latents adds a soft linear ramp after the hard region.
+        #
+        # mask values:
+        #   0.0  →  fully fixed (context frame)
+        #   0–1  →  soft transition
+        #   1.0  →  fully free (generation frame)
+
+        # Minimum latent frames fully covered by context images
+        min_locked = (actual_length - 1) // 4 + 1
+
+        # Hard-locked region (context + optional extra)
+        hard_locked = min(min_locked + extra_locked_latents, latent_t)
+
+        # Transition region ends here
+        transition_end = min(hard_locked + mask_transition_latents, latent_t)
+
+        logger.info(
+            f"WanImagesToVideo: {num_images} input imgs → {actual_length} active "
+            f"context frames → min_locked_latents={min_locked}, "
+            f"hard_locked={hard_locked}, transition_end={transition_end}, "
+            f"total_latent_t={latent_t}"
+        )
 
         mask = torch.ones(
             (
@@ -987,14 +1077,25 @@ class WanImagesToVideo:
             device=images_upscaled.device,
             dtype=images_upscaled.dtype,
         )
-        mask[:, :, :fixed_latent_frames] = 0.0
 
-        # 4. Patch conditioning
+        # Region A – hard context lock (0.0)
+        if hard_locked > 0:
+            mask[:, :, :hard_locked] = 0.0
+
+        # Region B – soft linear transition (0 < α < 1)
+        n_transition = transition_end - hard_locked
+        for i in range(n_transition):
+            alpha = (i + 1) / (n_transition + 1)  # stays strictly inside (0, 1)
+            mask[:, :, hard_locked + i] = alpha
+
+        # ── 6. Patch conditioning with concat_latent_image + mask ────────────
         positive = node_helpers.conditioning_set_values(
-            positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask}
+            positive,
+            {"concat_latent_image": concat_latent_image, "concat_mask": mask},
         )
         negative = node_helpers.conditioning_set_values(
-            negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask}
+            negative,
+            {"concat_latent_image": concat_latent_image, "concat_mask": mask},
         )
 
         if clip_vision_output is not None:
@@ -1005,9 +1106,11 @@ class WanImagesToVideo:
                 negative, {"clip_vision_output": clip_vision_output}
             )
 
+        locked_pct = 100.0 * transition_end / latent_t
         logger.info(
-            f"WanImagesToVideo: encoded {actual_length} images into {fixed_latent_frames} "
-            f"fixed latent frames. Total video length: {length} ({latent_t} latents)"
+            f"WanImagesToVideo: locked {hard_locked} + {n_transition} transition latent frames "
+            f"= {locked_pct:.1f}% of {latent_t} total latents constrained. "
+            f"Video length: {length} frames."
         )
 
         return (positive, negative, {"samples": latent})
@@ -1032,7 +1135,20 @@ class VideoSegmentPrepare:
                 "latent": ("LATENT",),
                 "cache_window_size": ("INT", {"default": 4}),
                 "overlap_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
-                "context_frames": ("INT", {"default": 1, "min": 1, "max": 64}),
+                "context_frames": (
+                    "INT",
+                    {
+                        "default": 8,
+                        "min": 1,
+                        "max": 64,
+                        "tooltip": (
+                            "Number of frames extracted from the end of the previous "
+                            "segment to use as context_images.  Connect context_images "
+                            "to WanImagesToVideo.images.  Higher values (8–17) give a "
+                            "stronger temporal prior and help prevent frozen-frame output."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -1148,6 +1264,9 @@ class VideoSegmentPrepare:
         if current_segment == 0:
             if initial_image is not None:
                 logger.info("Segment 0: Using initial_image, no cached latent")
+                # For segment 0 there is no previous video, so context_images is just
+                # the initial_image (1 frame).  Connect context_images → WanImagesToVideo.images
+                # and next_image → clip_vision pipeline.
                 return (initial_image, 0, False, "", None, initial_image, initial_image)
             else:
                 logger.warning("Segment 0: No initial_image provided, using fallback")
@@ -1226,11 +1345,15 @@ class VideoSegmentPrepare:
                     f"Loaded last segment video: {list(last_segment_video.shape)}"
                 )
 
-                # Extract context images (batch of frames)
+                # Extract context images (batch of frames) from the END of the last segment.
+                # These are passed to WanImagesToVideo.images (NOT next_image).
+                # The Wan VAE needs ≥5 frames to lock 2 latent frames, ≥9 for 3, ≥17 for 5.
+                # Default context_frames=8 locks 2 latent frames (motion direction prior).
                 actual_context = min(context_frames, last_segment_video.shape[0])
                 context_images = last_segment_video[-actual_context:]
                 logger.info(
-                    f"Extracted {actual_context} context images for WanImagesToVideo"
+                    f"Extracted {actual_context} context images from {os.path.basename(last_segment)} "
+                    f"→ will lock {(actual_context - 1) // 4 + 1} latent frames in WanImagesToVideo"
                 )
 
             except Exception as e:
