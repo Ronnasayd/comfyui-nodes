@@ -121,3 +121,5 @@ node.zip
 GEMINI.md
 .taskmaster/
 docs/agents/
+.taskmaster/state.json
+.sessions/
