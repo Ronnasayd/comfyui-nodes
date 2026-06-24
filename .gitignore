@@ -123,3 +123,15 @@ GEMINI.md
 docs/agents/
 .taskmaster/state.json
 .sessions/
+*caveman*
+*cavecrew*
+skills-lock.json
+.rulesignore
+.skillsignore
+.agentsignore
+.gemini/
+.claude/skills/*
+.claude/commands/*
+.claude/instructions/*
+.claude/agents/*
+.claude/hooks/*
