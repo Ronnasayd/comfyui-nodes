@@ -106,49 +106,33 @@ def _concat_videos(video_files: List[str], output_path: str):
     os.remove(list_path)
 
 
-def _crossfade_videos(video_files, output_path, crossfade_frames, fps):
+def _trim_and_concat_videos(video_files, output_path, trim_frames, fps, tmp_dir):
     _validate_positive(fps, "fps")
 
     if len(video_files) < 2:
         shutil.copy2(video_files[0], output_path)
         return
 
-    crossfade_duration = crossfade_frames / fps
+    trim_duration = trim_frames / fps
+    trimmed = [video_files[0]]
 
-    inputs = []
-    for vf in video_files:
-        inputs.extend(["-i", vf])
-
-    filter_parts = []
-    offset = 0
-    current = "[0:v]"
-
-    for i in range(1, len(video_files)):
-        prev_duration = _get_video_duration(video_files[i - 1])
-        offset += prev_duration - crossfade_duration
-        next_label = f"[v{i}]"
-
-        filter_parts.append(f"{current}[{i}:v]xfade=transition=fade:duration={crossfade_duration}:offset={offset}{next_label}")
-
-        current = next_label
-
-    cmd = (
-        ["ffmpeg", "-y"]
-        + inputs
-        + [
-            "-filter_complex",
-            ";".join(filter_parts),
-            "-map",
-            current,
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            output_path,
+    for i, vf in enumerate(video_files[1:], start=1):
+        trimmed_path = os.path.join(tmp_dir, f"trimmed_{i}.mp4")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(trim_duration),
+            "-i",
+            vf,
+            "-c",
+            "copy",
+            trimmed_path,
         ]
-    )
+        _run_subprocess(cmd, f"Trim failed for segment {i}")
+        trimmed.append(trimmed_path)
 
-    _run_subprocess(cmd, "Crossfade failed")
+    _concat_videos(trimmed, output_path)
 
 
 # ============================================================
@@ -173,7 +157,7 @@ class VideoConcatenate:
                 "fps": ("FLOAT", {"default": 16.0, "min": 1.0, "max": 120.0}),
             },
             "optional": {
-                "crossfade_frames": ("INT", {"default": 0, "min": 0, "max": 32}),
+                "trim_frames": ("INT", {"default": 0, "min": 0, "max": 64}),
                 "file_extension": (["mp4", "webm", "avi", "mov"],),
             },
         }
@@ -190,7 +174,7 @@ class VideoConcatenate:
         video_dir,
         output_name,
         fps,
-        crossfade_frames=0,
+        trim_frames=0,
         file_extension="mp4",
     ):
         base = folder_paths.get_output_directory()
@@ -217,9 +201,10 @@ class VideoConcatenate:
             logger.info(f"Single file — copied to {output_path}")
             return (output_path,)
 
-        if crossfade_frames > 0:
+        if trim_frames > 0:
             _validate_positive(fps, "fps")
-            _crossfade_videos(sources, output_path, crossfade_frames, fps)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                _trim_and_concat_videos(sources, output_path, trim_frames, fps, tmp_dir)
         else:
             _concat_videos(sources, output_path)
 
