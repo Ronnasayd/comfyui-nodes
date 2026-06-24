@@ -159,7 +159,7 @@ class PixelatedBorderNode:
             image = image[0]  # shape: (h, w, c)
             # Convert to (c, h, w) for torchvision
             image = image.permute(2, 0, 1).contiguous()
-            [C, H, W] = image.shape
+            [_, H, W] = image.shape
             image = TF.to_pil_image(image)
         width = int(height * (W / H))
         canvas = TF.resize(image, (height, width))
@@ -177,9 +177,7 @@ class PixelatedBorderNode:
         boxRight = (cwidth - cropRight, 0, cwidth, height)  # Example coordinates
         roiRight = canvas.crop(boxRight)
 
-        canvas = ImageOps.expand(
-            canvas, border=(paddingLeft, 0, paddingRight, 0), fill="black"
-        )
+        canvas = ImageOps.expand(canvas, border=(paddingLeft, 0, paddingRight, 0), fill="black")
         ncanvas = np.array(canvas)
 
         pixelSizeXLeft = int(roiLeft.width / pixel_width_left)
@@ -189,9 +187,7 @@ class PixelatedBorderNode:
             (roiLeft.width // pixelSizeXLeft, roiLeft.height // pixelSizeYLeft),
             Image.BILINEAR,
         )
-        pixaletedRoiLeft = smallLeft.resize(
-            (int(paddingLeft + cropLeft), height), Image.NEAREST
-        )
+        pixaletedRoiLeft = smallLeft.resize((int(paddingLeft + cropLeft), height), Image.NEAREST)
         widthPixaletedRoiLeft, heightPixaletedRoiLeft = pixaletedRoiLeft.size
 
         pixaletedRoiLeft = np.array(pixaletedRoiLeft)
@@ -204,19 +200,13 @@ class PixelatedBorderNode:
             (roiRight.width // pixelSizeXRight, roiRight.height // pixelSizeYRight),
             Image.BILINEAR,
         )
-        pixaletedRoiRight = smallRight.resize(
-            (int(paddingRight + cropRight), height), Image.NEAREST
-        )
-        widthPixaletedRoiRight, heightPixaletedRoiRight = pixaletedRoiRight.size
+        pixaletedRoiRight = smallRight.resize((int(paddingRight + cropRight), height), Image.NEAREST)
+        widthPixaletedRoiRight, _ = pixaletedRoiRight.size
 
         pixaletedRoiRight = np.array(pixaletedRoiRight)
         ncanvas[
             0:height,
-            paddingLeft
-            + cwidth
-            - cropRight : paddingLeft
-            + cwidth
-            + widthPixaletedRoiRight,
+            paddingLeft + cwidth - cropRight : paddingLeft + cwidth + widthPixaletedRoiRight,
             :,
         ] = pixaletedRoiRight
         result = Image.fromarray(ncanvas)
@@ -225,10 +215,8 @@ class PixelatedBorderNode:
         resized_tensor = resized_tensor.permute(1, 2, 0).contiguous()
         resized_tensor = resized_tensor.unsqueeze(0)
 
-        H, W, C = ncanvas.shape
-        mask = torch.ones(
-            (1, H, W), dtype=resized_tensor.dtype, device=resized_tensor.device
-        )
+        H, W, _ = ncanvas.shape
+        mask = torch.ones((1, H, W), dtype=resized_tensor.dtype, device=resized_tensor.device)
         mask[
             :,
             0:height,
@@ -236,15 +224,3 @@ class PixelatedBorderNode:
         ] = 0
 
         return (resized_tensor, mask)
-
-    """
-        The node will always be re executed if any of the inputs change but
-        this method can be used to force the node to execute again even when the inputs don't change.
-        You can make this node return a number or a string. This value will be compared to the one returned the last time the node was
-        executed, if it is different the node will be executed again.
-        This method is used in the core repo for the LoadImage node where they return the image hash as a string, if the image hash
-        changes between executions the LoadImage node is executed again.
-    """
-    # @classmethod
-    # def IS_CHANGED(s, image, string_field, int_field, float_field, print_to_screen):
-    #    return ""
